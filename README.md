@@ -48,6 +48,11 @@ while your editor was open — useful because TheHive itself does last-write-win
 
 ![Interactive case editing](screenshots/interactive-case.png)
 
+Note: alerts if case Title/Description changed while being edited locally
+
+![Interactive case editing](screenshots/interactive-softLocking.png)
+
+
 ### Creating/editing a page — `thehive-cli --case 666 --add-page -i`
 
 ![Interactive page editing](screenshots/interactive-page.png)

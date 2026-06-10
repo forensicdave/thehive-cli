@@ -1,0 +1,4455 @@
+#!/opt/homebrew/bin/python3
+
+#
+# aim to nicely print out hive5 tickets that:
+# match a certain ticket number
+# match a search on a string
+# created in certain time period
+# updated in certain time period
+#
+# display with clickable url and info
+#
+
+
+from typing import List
+
+import requests
+from requests.packages import urllib3
+urllib3.disable_warnings()
+
+import sys
+import json
+import time
+import uuid
+#import magic
+#import getopt
+import os
+import re
+import time
+import argparse
+import shutil
+import tempfile
+from datetime import datetime, timedelta, timezone
+import subprocess
+import shlex
+import keyring
+import getpass
+
+# Try to import shtab for shell completion support
+try:
+	import shtab
+	SHTAB_AVAILABLE = True
+except ImportError:
+	SHTAB_AVAILABLE = False
+
+
+VERSION="1.1.0"
+FILTERSUSED=""
+
+def parse_arguments():
+
+	examples = """Examples:
+
+  Setup:
+    ./thehive-cli --store-key                    # Store credentials in keychain (one-time setup)
+
+  Create a Case:
+    ./thehive-cli --create-case --interactive    # Create a case, editing title/description in $EDITOR
+    ./thehive-cli --create-case --case-title "Phishing" --case-description "Reported by user"
+    ./thehive-cli --create-case --interactive --case-template "Phishing"  # Apply a template at creation
+    ./thehive-cli --list-case-templates          # List available case templates
+
+  Get Specific Case:
+    ./thehive-cli --case 666                         # Get case #666 (-t / --ticket also work)
+    ./thehive-cli --case 666 --showdescription # Get case with full description
+    ./thehive-cli --case 666 --history               # Get case with activity history
+    ./thehive-cli --case 666 --comments              # Get case with comments
+    ./thehive-cli --case 666 --case-live-feed        # Get live feed for this specific case
+    ./thehive-cli --case 666 --history --comments    # Get case with both history and comments
+    ./thehive-cli --case 666 --list-observables      # List all observables for this case
+    ./thehive-cli --case 666 --list-observables --json  # As JSON
+    ./thehive-cli --case 666 --interactive           # Edit case title/description in $EDITOR
+    ./thehive-cli --case 666 --update-case --interactive          # Same, explicit form (alias: --case-update)
+    ./thehive-cli --case 666 --update-case --case-title "New title"  # Non-interactive update
+    ./thehive-cli --case 666 --update-case --case-description - < notes.md  # Description from stdin
+
+  Add Comment to Case:
+    ./thehive-cli --case 666 --add-comment "Fixed the issue"
+    ./thehive-cli --case 666 --add-comment                       # no text -> compose in $EDITOR (markdown)
+    ./thehive-cli --case 666 --add-comment "rough draft" --interactive  # edit the draft in $EDITOR
+    echo "Comment from stdin" | ./thehive-cli --case 666 --add-comment -
+    ./thehive-cli --case 666 --add-comment - < comment.txt
+
+  Add Attachment to Case:
+    ./thehive-cli --case 666 --add-attachment /path/to/file.pdf
+    ./thehive-cli --case 666 --add-attachment                     # no path -> pick a file from the current directory
+    ./thehive-cli --case 666 --add-attachment ~/Downloads         # a directory -> pick from inside it (newest-first)
+    ./thehive-cli --case 666 --add-attachment ~/Downloads --attachment-sort name  # sort by name (or size)
+    ./thehive-cli --case 666 --add-attachment evidence.jpg --attachment-name "case666_evidence.jpg"  # upload under a different name
+    ./thehive-cli --case 666 --add-attachment report.docx --add-comment "See attached report"
+    ./thehive-cli --case 666 --add-attachment evidence.jpg --timestamp-attachment  # uploads as 20260311_143022_evidence.jpg
+
+  Render Case Report:
+    ./thehive-cli --case 666 --render-report template_name        # Render to stdout
+    ./thehive-cli --case 666 --render-report template_id --output-file report.html
+
+  Manage Case Pages:
+    ./thehive-cli --case 666 --list-pages                        # List all pages for a case
+    ./thehive-cli --case 666 --list-pages --json                 # As JSON (includes full content)
+    ./thehive-cli --case 666 --add-page --page-title "Runbook" --page-content "## Steps" --page-category "Notes"
+    ./thehive-cli --case 666 --add-page --interactive          # compose a new page in $EDITOR
+    ./thehive-cli --case 666 --add-page --page-title "Runbook" --page-content - --page-category "Notes" < notes.md
+    ./thehive-cli --case 666 --update-page ~1234 --page-content "Updated body text"
+    ./thehive-cli --case 666 --update-page ~1234 --page-title "New title" --page-order 2
+    ./thehive-cli --case 666 --update-page ~1234 --interactive   # Edit page in $EDITOR, apply if changed
+
+  Add Observables:
+    ./thehive-cli --case 666 --add-observable --obs-type ip --obs-data 45.83.12.9 --obs-ioc --obs-tags c2,emotet
+    ./thehive-cli --case 666 --add-observable --obs-type domain --obs-data "a.com,b.com,c.com"  # bulk same type
+    ./thehive-cli --case 666 --add-observable --obs-type ip --obs-data - < ips.txt   # one value per line
+    ./thehive-cli --case 666 --add-observable --obs-file /path/malware.bin --obs-message "dropper"
+    ./thehive-cli --case 666 --add-observable --interactive      # Paste a line-based IOC table in $EDITOR
+    ./thehive-cli --case 666 --add-ioc --obs-type ip --obs-data - < ips.txt   # same, but flags all as IOCs
+
+  Timeline Events:
+    ./thehive-cli --case 666 --list-events                       # List custom timeline events (with IDs)
+    ./thehive-cli --case 666 --add-event --event-title "Containment started" --event-date "2026-06-09 14:30"
+    ./thehive-cli --case 666 --add-event --interactive           # Add an event, editing in $EDITOR
+    ./thehive-cli --case 666 --update-event ~1234 --interactive  # Edit an event in $EDITOR, apply if changed
+    ./thehive-cli --case 666 --delete-event ~1234                # Delete a custom event
+
+  Tasks:
+    ./thehive-cli --case 666 --list-tasks                        # List tasks (with IDs)
+    ./thehive-cli --case 666 --add-task --task-title "Collect logs" --task-group forensics
+    ./thehive-cli --case 666 --add-task --interactive            # Compose a task in $EDITOR
+    ./thehive-cli --case 666 --add-task-log ~1234 --task-log-message "Pulled EDR logs"
+    ./thehive-cli --case 666 --add-task-log ~1234 --interactive  # Write the work-log entry in $EDITOR
+
+  Attachments / Export / Account:
+    ./thehive-cli --case 666 --download-attachment               # List attachments + their IDs
+    ./thehive-cli --case 666 --download-attachment ~5678 --output-file evidence.pdf
+    ./thehive-cli --case 666 --export-case --output-file case666.thar   # Encrypted .thar archive
+    ./thehive-cli --case 666 --export-misp "MyMISP"              # Export to a configured MISP server
+    ./thehive-cli --whoami                                   # Show the current API user
+
+  List Cases:
+    ./thehive-cli --list-cases                    # List all cases (alias: --list-all)
+    ./thehive-cli --list-cases --showdescription  # List all cases with descriptions
+
+  List Alerts:
+    ./thehive-cli --list-alerts                  # List all alerts
+    ./thehive-cli --list-alerts --alert-status New    # List only new alerts
+    ./thehive-cli --list-alerts --alert-status Imported  # List imported alerts
+    ./thehive-cli --list-alerts --title phishing # List alerts with "phishing" in title
+    ./thehive-cli --list-alerts --showdescription # List alerts with descriptions
+
+  List Report Templates:
+    ./thehive-cli --list-report-templates        # List all available case report templates
+
+  Live Feed:
+    ./thehive-cli --live-feed 20                 # Show 20 most recent activities (alerts & cases)
+    ./thehive-cli --live-feed 50                 # Show 50 most recent activities
+
+  Filter by Stage/Status:
+    ./thehive-cli --list-cases --status new        # List all new/open cases (case-insensitive)
+    ./thehive-cli --list-cases --status InProgress # List in-progress cases
+    ./thehive-cli --list-cases --status Resolved   # List resolved cases
+    ./thehive-cli --list-cases --status closed     # List closed cases
+
+  Filter by User:
+    ./thehive-cli --list-cases --createdby user@example.com
+
+  Search by Title:
+    ./thehive-cli --list-cases --title malware     # Search for "malware" in title
+    ./thehive-cli --list-cases --title "phish*"    # Search for titles starting with "phish"
+
+  Search by Description:
+    ./thehive-cli --list-cases --description "ransomware"
+
+  Combined Filters:
+    ./thehive-cli --list-cases --status new --createdby user@example.com
+    ./thehive-cli --list-cases --title phishing --status new
+
+  Command-line API Key:
+    ./thehive-cli --api-key YOUR_KEY --case 666
+    ./thehive-cli --api-key YOUR_KEY --url http://hive:9000 --list-cases
+
+  Debugging:
+    ./thehive-cli --case 666 --comments --DEBUG     # Show debug output for troubleshooting
+
+  Shell Completion (requires shtab: pip install shtab):
+    ./thehive-cli --print-completion bash > ~/.local/share/bash-completion/completions/thehive-cli
+    ./thehive-cli --print-completion zsh > ~/.zsh/completion/_thehive-cli
+    # Then add to your ~/.zshrc: fpath=(~/.zsh/completion $fpath)
+"""
+
+	parser = argparse.ArgumentParser(
+		prog='thehive-cli',
+		description='TheHive CLI - Command-line interface for TheHive security incident response platform',
+		formatter_class=argparse.RawDescriptionHelpFormatter,
+		epilog=examples
+	)
+	# Arguments are organised into groups so that `-h` reads in the same order as the
+	# README command reference. Grouping is display-only; it does not affect parsing.
+	g_case = parser.add_argument_group('case operations')
+	g_case.add_argument('--ticket', '-t', '--case', dest='ticket', required=False, help='Returns details of a specific case by number (alias: --case)', default='')
+	g_case.add_argument('--list-cases', '--list-all', dest='list_all', required=False, nargs='?', const=True, help='List cases (alias: --list-all)', default=False)
+	g_case.add_argument('--status', required=False, help='Hive Case stage filter. Valid values: New, InProgress, Resolved, Closed (case-insensitive)', default='')
+	g_case.add_argument('--title', required=False, help='Search in title (use * for wildcard, e.g., "phish*" or "*malware")', default='')
+	g_case.add_argument('--description', required=False, help='Search in description (use * for wildcard)', default='')
+	g_case.add_argument('--createdby', required=False, help='Filter for created by (email address)', default='')
+	g_case.add_argument('--showdescription', required=False, nargs='?', const=True, help='Show full ticket description in output', default=False)
+	g_case.add_argument('--update-case', '--case-update', dest='update_case', required=False, nargs='?', const=True, help='Update an existing case title/description (requires --ticket; use --interactive, or --case-title/--case-description)', default=False)
+
+	g_create = parser.add_argument_group('creating cases')
+	g_create.add_argument('--create-case', required=False, nargs='?', const=True, help='Create a new case (use --interactive, or --case-title/--case-description)', default=False)
+	g_create.add_argument('--case-title', required=False, help='Title for the new case (used with --create-case)', default='')
+	g_create.add_argument('--case-description', required=False, help='Description for the new case (used with --create-case). Use "-" to read from stdin', default='')
+	g_create.add_argument('--case-template', required=False, help='Apply a case template by name when creating (optional, used with --create-case)', default='')
+	g_create.add_argument('--list-case-templates', required=False, nargs='?', const=True, help='List available case templates', default=False)
+	g_create.add_argument('--interactive', '-i', required=False, action='store_true', help='Edit in $EDITOR before updating: the case title/description by default, or a page when combined with --update-page (requires --ticket); also fills in --create-case / --add-page / --add-observable / --add-event', default=False)
+
+	g_alert = parser.add_argument_group('alert operations')
+	g_alert.add_argument('--list-alerts', required=False, nargs='?', const=True, help='List all alerts', default=False)
+	g_alert.add_argument('--alert-status', required=False, help='Filter alerts by status (e.g., New, Imported, Ignored)', default='')
+
+	g_detail = parser.add_argument_group('case details & export')
+	g_detail.add_argument('--comments', '--list-comments', dest='comments', required=False, nargs='?', const=True, help='Show comments for the case (requires --ticket; alias: --list-comments)', default=False)
+	g_detail.add_argument('--history', '--list-history', dest='history', required=False, nargs='?', const=True, help='Show activity history for the case (requires --ticket; alias: --list-history)', default=False)
+	g_detail.add_argument('--case-live-feed', required=False, nargs='?', const=True, help='Show live feed for specific case (requires --ticket)', default=False)
+	g_detail.add_argument('--download-attachment', required=False, nargs='?', const='@list', help='Download a case attachment by ID (requires --ticket); omit the ID to list the case attachments and their IDs. Output path via --output-file', default='', metavar='ATTACHMENT_ID')
+	g_detail.add_argument('--export-case', required=False, nargs='?', const=True, help='Export the case to an encrypted .thar archive (requires --ticket). Output via --output-file; password via --export-password or prompt', default=False)
+	g_detail.add_argument('--export-password', required=False, help='Password to encrypt the --export-case archive (prompted if omitted)', default='')
+	g_detail.add_argument('--export-misp', required=False, help='Export the case to a configured MISP server by name (requires --ticket)', default='', metavar='MISP_SERVER')
+
+	g_task = parser.add_argument_group('tasks')
+	g_task.add_argument('--list-tasks', required=False, nargs='?', const=True, help='List tasks for a case (requires --ticket)', default=False)
+	g_task.add_argument('--add-task', required=False, nargs='?', const=True, help='Add a task to a case (requires --ticket). Provide --task-title (+ --task-description/--task-group), or use --interactive', default=False)
+	g_task.add_argument('--add-task-log', required=False, help='Add a work-log entry to a task by TASK_ID (requires --ticket). Message via --task-log-message, "-" for stdin, or --interactive/$EDITOR', default='', metavar='TASK_ID')
+	g_task.add_argument('--task-title', required=False, help='Task title (used with --add-task)', default='')
+	g_task.add_argument('--task-description', required=False, help='Task description (used with --add-task; "-" for stdin)', default='')
+	g_task.add_argument('--task-group', required=False, help='Task group (used with --add-task)', default='')
+	g_task.add_argument('--task-log-message', required=False, help='Task log message (used with --add-task-log; "-" for stdin)', default='')
+
+	g_mod = parser.add_argument_group('comments & attachments')
+	g_mod.add_argument('--add-comment', required=False, nargs='?', const='@editor', help='Add a comment to the case (requires --ticket). Pass text, "-" for stdin, or omit the text to compose in $EDITOR', default='')
+	_attach_arg = g_mod.add_argument('--add-attachment', required=False, nargs='?', const='@pick', help='Add an attachment to the case (requires --ticket). Give a file path, a directory to pick a file from inside it, or omit it to pick from the current directory (fzf, else a prompt)', default='')
+	g_mod.add_argument('--attachment-name', required=False, help='Store the attachment under this name instead of its original filename (used with --add-attachment)', default='')
+	g_mod.add_argument('--attachment-sort', required=False, choices=['name', 'mtime', 'size'], help='Sort order for the --add-attachment file picker (default: mtime = newest first)', default='mtime')
+	g_mod.add_argument('--attachment-sort-reverse', required=False, action='store_true', help='Reverse the --attachment-sort order (oldest/smallest first, or Z->A)', default=False)
+	g_mod.add_argument('--timestamp-attachment', required=False, action='store_true', help='Prepend current UTC timestamp (YYYYmmDD_HHMMSS_) to the attachment filename before uploading (used with --add-attachment)', default=False)
+
+	g_report = parser.add_argument_group('report templates')
+	g_report.add_argument('--list-report-templates', required=False, nargs='?', const=True, help='List all available case report templates', default=False)
+	g_report.add_argument('--render-report', required=False, help='Render case report using template (requires --ticket). Specify template ID or name', default='')
+	_outfile_arg = g_report.add_argument('--output-file', required=False, help='Output file for rendered report (used with --render-report). If not specified, prints to stdout', default='')
+
+	g_page = parser.add_argument_group('pages')
+	g_page.add_argument('--list-pages', required=False, nargs='?', const=True, help='List all pages for a case (requires --ticket)', default=False)
+	g_page.add_argument('--add-page', required=False, nargs='?', const=True, help='Create a page in a case (requires --ticket). Provide --page-title/--page-content/--page-category, or use --interactive to compose in $EDITOR', default=False)
+	g_page.add_argument('--update-page', required=False, help='Update a case page by page ID (requires --ticket and at least one --page-* field)', default='', metavar='PAGE_ID')
+	g_page.add_argument('--page-title', required=False, help='Page title (used with --add-page/--update-page)', default='')
+	g_page.add_argument('--page-content', required=False, help='Page content/markdown (used with --add-page/--update-page). Use "-" to read from stdin', default='')
+	g_page.add_argument('--page-category', required=False, help='Page category (used with --add-page/--update-page)', default='')
+	g_page.add_argument('--page-order', required=False, type=int, help='Page display order (optional int, used with --add-page/--update-page)', default=None)
+
+	g_obs = parser.add_argument_group('observables')
+	g_obs.add_argument('--list-observables', required=False, nargs='?', const=True, help='List all observables for a case (requires --ticket)', default=False)
+	g_obs.add_argument('--add-observable', required=False, nargs='?', const=True, help='Add observable(s) to a case (requires --ticket). Use --interactive for a line-based table', default=False)
+	g_obs.add_argument('--add-ioc', required=False, nargs='?', const=True, help='Like --add-observable, but flags everything it adds as an IOC (ioc=true)', default=False)
+	g_obs.add_argument('--obs-type', required=False, help='Observable dataType, e.g. ip, domain, hash, url (used with --add-observable)', default='')
+	g_obs.add_argument('--obs-data', required=False, help='Observable value; comma-separated for several, or "-" to read one-per-line from stdin (used with --add-observable)', default='')
+	_obsfile_arg = g_obs.add_argument('--obs-file', required=False, help='Create a file observable from this path (used with --add-observable)', default='')
+	g_obs.add_argument('--obs-ioc', required=False, action='store_true', help='Mark observable(s) as IOC (used with --add-observable)', default=False)
+	g_obs.add_argument('--obs-sighted', required=False, action='store_true', help='Mark observable(s) as sighted (used with --add-observable)', default=False)
+	g_obs.add_argument('--obs-tags', required=False, help='Comma-separated tags for the observable(s) (used with --add-observable)', default='')
+	g_obs.add_argument('--obs-tlp', required=False, type=int, help='TLP level 0-4 for the observable(s) (used with --add-observable)', default=None)
+	g_obs.add_argument('--obs-message', required=False, help='Message/note for the observable(s) (used with --add-observable)', default='')
+
+	g_event = parser.add_argument_group('timeline events')
+	g_event.add_argument('--list-events', required=False, nargs='?', const=True, help='List custom timeline events for a case (requires --ticket)', default=False)
+	g_event.add_argument('--add-event', required=False, nargs='?', const=True, help='Add a custom timeline event (requires --ticket). Use --interactive, or --event-title/--event-date', default=False)
+	g_event.add_argument('--update-event', required=False, help='Update a custom timeline event by event ID (requires --ticket). Use --interactive or --event-* flags', default='', metavar='EVENT_ID')
+	g_event.add_argument('--delete-event', required=False, help='Delete a custom timeline event by event ID (requires --ticket)', default='', metavar='EVENT_ID')
+	g_event.add_argument('--event-title', required=False, help='Title for the timeline event (used with --add-event/--update-event)', default='')
+	g_event.add_argument('--event-date', required=False, help='Event date: "YYYY-MM-DD HH:MM[:SS]" (local) or epoch-ms; defaults to now on --add-event', default='')
+	g_event.add_argument('--event-end', required=False, help='Optional event end date (makes it a span): "YYYY-MM-DD HH:MM[:SS]" or epoch-ms', default='')
+	g_event.add_argument('--event-description', required=False, help='Description/markdown for the event (used with --add-event/--update-event). Use "-" for stdin', default='')
+
+	g_feed = parser.add_argument_group('live feed')
+	g_feed.add_argument('--live-feed', required=False, type=int, help='Show recent activity (live feed) - specify number of items (default: 20)', default=0, metavar='N')
+
+	g_auth = parser.add_argument_group('authentication & account')
+	g_auth.add_argument('--store-key', '--store-credentials', '--set-api-key', '--login', dest='store_key', required=False, nargs='?', const=True, help='Store TheHive URL + API key in keychain (aliases: --store-credentials, --set-api-key, --login)', default=False)
+	g_auth.add_argument('--whoami', required=False, nargs='?', const=True, help='Show the current API user (login, organisation, profile)', default=False)
+	g_auth.add_argument('--show-credentials', required=False, nargs='?', const=True, help='Show currently stored keychain credentials (API key is masked)', default=False)
+	g_auth.add_argument('--api-key', required=False, help='TheHive API key (if not provided, will use keychain)', default='')
+	g_auth.add_argument('--url', required=False, help='TheHive URL (if not provided, will use keychain or default)', default='')
+
+	g_out = parser.add_argument_group('output & other')
+	g_out.add_argument('--json', required=False, action='store_true',
+		help='Output results as JSON (suppresses decorative text and clipboard)', default=False)
+	g_out.add_argument('--version', '-v', action='version', version=f'thehive-cli {VERSION}', help='Show program version and exit')
+	g_out.add_argument('--DEBUG', required=False, nargs='?', const='yes', help='Enable Debugging', default='')
+
+	# Add shell completion support if shtab is available
+	if SHTAB_AVAILABLE:
+		# Make file-path arguments complete filenames in bash/zsh/fish
+		_attach_arg.complete = shtab.FILE
+		_outfile_arg.complete = shtab.FILE
+		_obsfile_arg.complete = shtab.FILE
+		shtab.add_argument_to(parser, ["-s", "--print-completion"])
+
+	return parser.parse_args()
+
+
+def severityToStr ( severityNum ):
+	if severityNum == 1:
+		severityStr="low"
+	elif severityNum == 2:
+		severityStr="medium"
+	elif severityNum == 3:
+		severityStr="high"
+	elif severityNum == 4:
+		severityStr="critical"
+	else:
+		severityStr = "unknown"
+	return severityStr
+#end def severityToStr ( severityNum ):
+def write_to_clipboard(output):
+	process = subprocess.Popen(
+		'/usr/bin/pbcopy', env={'LANG': 'en_US.UTF-8'}, stdin=subprocess.PIPE)
+	process.communicate(output.encode('utf-8'))
+
+def store_credentials():
+	"""Store TheHive API credentials in keychain"""
+	print("Store TheHive Credentials in Keychain")
+	print("=" * 50)
+
+	url = input("Enter TheHive URL (e.g., http://192.168.2.49:9000): ").strip()
+	if not url:
+		print("URL cannot be empty")
+		return False
+
+	api_key = getpass.getpass("Enter TheHive API Key: ").strip()
+	if not api_key:
+		print("API key cannot be empty")
+		return False
+
+	try:
+		keyring.set_password("thehive", "url", url)
+		keyring.set_password("thehive", "api_key", api_key)
+		print("\nCredentials stored successfully in keychain!")
+		return True
+	except Exception as e:
+		print(f"Error storing credentials: {e}")
+		return False
+
+def show_credentials():
+	"""Display currently stored TheHive credentials from keychain"""
+	url = keyring.get_password("thehive", "url")
+	api_key = keyring.get_password("thehive", "api_key")
+
+	print("Stored TheHive Credentials")
+	print("=" * 50)
+	if url:
+		print(f"URL:     {url}")
+	else:
+		print("URL:     (not set)")
+
+	if api_key:
+		masked = api_key[:4] + "*" * (len(api_key) - 8) + api_key[-4:] if len(api_key) > 8 else "****"
+		print(f"API Key: {masked}")
+	else:
+		print("API Key: (not set)")
+
+	if not url or not api_key:
+		print("\nRun with --store-key to set missing credentials.")
+
+def get_credentials(url_override='', api_key_override=''):
+	"""Get TheHive credentials from keychain or overrides"""
+
+	# Use command-line overrides if provided
+	if url_override:
+		url = url_override
+	else:
+		url = keyring.get_password("thehive", "url")
+		if not url:
+			print("ERROR: No URL found in keychain and none provided via --url")
+			print("Please run with --store-key to store credentials, or provide --url on command line")
+			sys.exit(1)
+
+	if api_key_override:
+		api_key = api_key_override
+	else:
+		api_key = keyring.get_password("thehive", "api_key")
+		if not api_key:
+			print("ERROR: No API key found in keychain and none provided via --api-key")
+			print("Please run with --store-key to store credentials, or provide --api-key on command line")
+			sys.exit(1)
+
+	return url, api_key
+
+def format_timestamp(timestamp_ms):
+	"""Convert millisecond timestamp to readable datetime string"""
+	if timestamp_ms:
+		try:
+			timestamp_sec = int(timestamp_ms) / 1000
+			dt_object = datetime.fromtimestamp(timestamp_sec)
+			return dt_object.strftime('%Y-%m-%d %H:%M:%S')
+		except:
+			return str(timestamp_ms)
+	return "N/A"
+
+def format_field_value(key, value):
+	"""Format field values for display, handling special cases"""
+	# Time field names that should be converted
+	time_fields = ['_createdAt', '_updatedAt', 'createdAt', 'updatedAt',
+	               'startDate', 'endDate', 'date', 'timestamp', 'occurDate']
+
+	if key in time_fields and isinstance(value, (int, float)):
+		return format_timestamp(value)
+	elif isinstance(value, dict):
+		# Nested dictionary - format as indented key-value pairs
+		result = ""
+		for k, v in value.items():
+			if not k.startswith('_'):  # Skip internal fields
+				formatted_v = format_field_value(k, v)
+				result += f"\n      {k}: {formatted_v}"
+		return result if result else str(value)
+	elif isinstance(value, list):
+		# List - format as comma-separated or numbered items
+		if len(value) == 0:
+			return "[]"
+		elif len(value) <= 3:
+			return ", ".join(str(v) for v in value)
+		else:
+			return f"[{len(value)} items]"
+	else:
+		return str(value)
+
+def _sort_files(paths, sort_mode="mtime", reverse=False):
+	"""Sort file paths by 'name' (A->Z), 'mtime' (newest first) or 'size' (largest first).
+	`reverse` flips whichever order the mode uses by default."""
+	def _stat(p, attr):
+		try:
+			return getattr(os.stat(p), attr)
+		except OSError:
+			return 0
+	if sort_mode == "mtime":
+		return sorted(paths, key=lambda p: _stat(p, "st_mtime"), reverse=not reverse)
+	if sort_mode == "size":
+		return sorted(paths, key=lambda p: _stat(p, "st_size"), reverse=not reverse)
+	# name: default order for this mode is ascending, case-insensitive
+	return sorted(paths, key=lambda p: os.path.basename(p).lower(), reverse=reverse)
+
+
+def _collect_files(start_dir):
+	"""Recursively list non-hidden files under start_dir (skipping hidden directories)."""
+	out = []
+	for root, dirs, files in os.walk(start_dir):
+		dirs[:] = [d for d in dirs if not d.startswith(".")]
+		for f in files:
+			if not f.startswith("."):
+				out.append(os.path.join(root, f))
+	return out
+
+
+def pick_file_interactively(start_dir=".", sort_mode="mtime", reverse=False):
+	"""Interactively choose a file under start_dir: fzf if available, otherwise a
+	TAB-completing prompt (press Enter to browse a numbered menu). The candidate list is
+	sorted by sort_mode. Returns a path, or None if cancelled."""
+	if shutil.which("fzf"):
+		return _pick_with_fzf(start_dir, sort_mode, reverse)
+	return _prompt_for_path(start_dir, sort_mode, reverse)
+
+
+def _pick_with_fzf(start_dir=".", sort_mode="mtime", reverse=False):
+	"""Feed fzf the sorted files under start_dir; return the selection or None."""
+	files = _sort_files(_collect_files(start_dir), sort_mode, reverse)
+	if not files:
+		print(f"No files found under {start_dir}.")
+		return None
+	try:
+		# --reverse puts the first (e.g. newest) item at the top; typing re-ranks by match
+		proc = subprocess.run(
+			["fzf", "--prompt", "attachment> ", "--reverse"],
+			input="\n".join(files), stdout=subprocess.PIPE, text=True)
+	except Exception as e:
+		if DEBUG:
+			print(f"DEBUG: fzf invocation failed: {e}", file=sys.stderr)
+		return _prompt_for_path(start_dir, sort_mode, reverse)
+	if proc.returncode != 0:
+		return None  # cancelled (Esc / Ctrl-C) or no match
+	sel = proc.stdout.strip()
+	return sel or None
+
+
+def _prompt_for_path(start_dir=".", sort_mode="mtime", reverse=False):
+	"""Prompt for a file path with readline TAB-completion; empty input opens a numbered
+	browser. When start_dir is given, the prompt is pre-filled with it."""
+	prefill = os.path.join(start_dir, "") if start_dir not in ("", ".") else ""
+	try:
+		import readline
+		import glob
+
+		def _completer(text, state):
+			expanded = os.path.expanduser(text)
+			matches = [m + ("/" if os.path.isdir(m) else "") for m in glob.glob(expanded + "*")]
+			return matches[state] if state < len(matches) else None
+
+		readline.set_completer_delims(" \t\n")
+		readline.set_completer(_completer)
+		# macOS ships libedit, which binds completion differently from GNU readline
+		if "libedit" in (readline.__doc__ or ""):
+			readline.parse_and_bind("bind ^I rl_complete")
+		else:
+			readline.parse_and_bind("tab: complete")
+		if prefill:
+			readline.set_startup_hook(lambda: readline.insert_text(prefill))
+	except Exception:
+		pass
+
+	try:
+		path = input("File path (TAB to complete, Enter to browse): ").strip()
+	except (EOFError, KeyboardInterrupt):
+		print()
+		return None
+	finally:
+		try:
+			import readline
+			readline.set_completer(None)
+			readline.set_startup_hook()
+		except Exception:
+			pass
+
+	if not path:
+		return _browse_menu(start_dir, sort_mode, reverse)
+	return os.path.expanduser(path)
+
+
+def _browse_menu(start, sort_mode="mtime", reverse=False):
+	"""Numbered directory browser: directories alphabetical, files by sort_mode.
+	Returns a chosen file path or None."""
+	cur = os.path.abspath(start)
+	while True:
+		try:
+			names = os.listdir(cur)
+		except OSError as e:
+			print(f"  cannot read {cur}: {e}")
+			return None
+		dirs = sorted([n for n in names if os.path.isdir(os.path.join(cur, n))], key=str.lower)
+		file_paths = _sort_files(
+			[os.path.join(cur, n) for n in names if os.path.isfile(os.path.join(cur, n))],
+			sort_mode, reverse)
+		files = [os.path.basename(p) for p in file_paths]
+		items = [".. (up)"] + [d + "/" for d in dirs] + files
+		print(f"\n  {cur}   (files by {sort_mode})")
+		for i, it in enumerate(items):
+			print(f"   {i:>3}  {it}")
+		try:
+			sel = input("  number to open/select ('q' to cancel): ").strip()
+		except (EOFError, KeyboardInterrupt):
+			print()
+			return None
+		if sel.lower() == "q" or sel == "":
+			return None
+		if not sel.isdigit() or int(sel) >= len(items):
+			print("  invalid selection")
+			continue
+		idx = int(sel)
+		if idx == 0:
+			cur = os.path.dirname(cur)
+		elif items[idx].endswith("/"):
+			cur = os.path.join(cur, items[idx][:-1])
+		else:
+			return os.path.join(cur, items[idx])
+
+
+def prompt_upload_name(default):
+	"""Prompt for the name to store the attachment under, pre-filled with `default` (editable)."""
+	try:
+		import readline
+		readline.set_startup_hook(lambda: readline.insert_text(default))
+	except Exception:
+		readline = None
+	try:
+		name = input("Upload as: " if readline else f"Upload as [{default}]: ").strip()
+	except (EOFError, KeyboardInterrupt):
+		name = ""
+	finally:
+		try:
+			if readline:
+				readline.set_startup_hook()
+		except Exception:
+			pass
+	return name or default
+
+
+def add_attachment_to_case(api, case_id, file_path, timestamp=False, upload_name=None, json_output=False):
+	"""Add an attachment to a case, optionally under a different name (upload_name)."""
+	if not json_output:
+		print("\n###############")
+		print("ADD ATTACHMENT")
+		print("###############\n")
+
+	tmp_dir = None
+	try:
+		# Validate file exists
+		if not os.path.exists(file_path):
+			print(f"✗ Error: File not found: {file_path}")
+			return False
+
+		if not os.path.isfile(file_path):
+			print(f"✗ Error: Path is not a file: {file_path}")
+			return False
+
+		# Get file size for display
+		file_size = os.path.getsize(file_path)
+
+		# Name TheHive will store: explicit upload_name, else the original basename;
+		# an optional timestamp prefix composes on top of either.
+		file_name = upload_name if upload_name else os.path.basename(file_path)
+		if timestamp:
+			ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_')
+			file_name = ts + file_name
+
+		# TheHive names the attachment from the uploaded path's basename, so when the
+		# desired name differs from the original we upload a symlink carrying the new name.
+		upload_path = file_path
+		if file_name != os.path.basename(file_path):
+			tmp_dir = tempfile.mkdtemp()
+			upload_path = os.path.join(tmp_dir, file_name)
+			os.symlink(os.path.abspath(file_path), upload_path)
+			if DEBUG:
+				print(f"DEBUG: Uploading under name: {file_name}", file=sys.stderr)
+
+		if DEBUG:
+			print(f"DEBUG: Adding attachment to case_id: {case_id}", file=sys.stderr)
+			print(f"DEBUG: File path: {file_path}", file=sys.stderr)
+			print(f"DEBUG: File name: {file_name}", file=sys.stderr)
+			print(f"DEBUG: File size: {file_size} bytes", file=sys.stderr)
+
+		if not json_output:
+			print(f"Uploading: {file_name} ({file_size} bytes)")
+
+		# Add the attachment using TheHive API
+		# The API expects a list of file paths
+		result = api.case.add_attachment(case_id, attachment_paths=[upload_path])
+
+		if DEBUG:
+			print(f"DEBUG: Attachment upload result: {result}", file=sys.stderr)
+
+		if json_output:
+			return {"success": True, "action": "add_attachment", "case_id": case_id, "file": file_name, "size": file_size}
+
+		print(f"✓ Attachment successfully added to case {case_id}")
+		print(f"  File: {file_name}")
+
+		# Show attachment details if available
+		if result and len(result) > 0:
+			attachment = result[0]
+			if hasattr(attachment, '_id'):
+				print(f"  Attachment ID: {attachment._id}")
+			if hasattr(attachment, 'name'):
+				print(f"  Name: {attachment.name}")
+			if hasattr(attachment, 'size'):
+				print(f"  Size: {attachment.size} bytes")
+
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "add_attachment", "case_id": case_id, "error": str(e)}
+		print(f"✗ Error adding attachment: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+	finally:
+		if tmp_dir:
+			shutil.rmtree(tmp_dir, ignore_errors=True)
+
+def list_report_templates(api, json_output=False):
+	"""List all available case report templates"""
+	if not json_output:
+		print("\n########################")
+		print("CASE REPORT TEMPLATES")
+		print("########################\n")
+
+	try:
+		if DEBUG:
+			print(f"DEBUG: Fetching report templates", file=sys.stderr)
+
+		# Try different API endpoints for listing templates
+		templates = None
+		endpoints_to_try = [
+			"/api/v1/report/template",
+			"/api/v1/case/report/template",
+			"/api/v1/reportTemplate",
+		]
+
+		for endpoint in endpoints_to_try:
+			try:
+				if DEBUG:
+					print(f"DEBUG: Trying endpoint: {endpoint}", file=sys.stderr)
+
+				response = api.session.make_request("POST", "/api/v1/query", json={
+					"query": [{"_name": "listReportTemplate"}]
+				})
+
+				if response:
+					templates = response
+					if DEBUG:
+						print(f"DEBUG: Success with query API", file=sys.stderr)
+					break
+			except Exception as e:
+				if DEBUG:
+					print(f"DEBUG: Query failed, trying GET on {endpoint}: {e}", file=sys.stderr)
+				try:
+					response = api.session.make_request("GET", endpoint)
+					if response:
+						templates = response
+						if DEBUG:
+							print(f"DEBUG: Success with endpoint: {endpoint}", file=sys.stderr)
+						break
+				except Exception as e2:
+					if DEBUG:
+						print(f"DEBUG: Endpoint {endpoint} failed: {e2}", file=sys.stderr)
+					continue
+
+		if templates is None or len(templates) == 0:
+			if json_output:
+				return {"mode": "list_report_templates", "count": 0, "templates": []}
+			print("No report templates found or unable to retrieve templates.")
+			print("\nPlease check:")
+			print("  1. You have permissions to view report templates")
+			print("  2. Report templates exist in your TheHive instance")
+			print("  3. Your TheHive version supports report templates")
+			return False
+
+		if DEBUG:
+			print(f"DEBUG: Found {len(templates)} templates", file=sys.stderr)
+			print(f"DEBUG: Template data type: {type(templates)}", file=sys.stderr)
+
+		if json_output:
+			result = []
+			for template in templates:
+				if isinstance(template, dict):
+					result.append({
+						"_id": template.get('_id', template.get('id', '')),
+						"name": template.get('name', template.get('title', '')),
+						"format": template.get('format', template.get('contentType', ''))
+					})
+			return {"mode": "list_report_templates", "count": len(result), "templates": result}
+
+		# Display templates
+		print(f"Found {len(templates)} report template(s):\n")
+		print(f"{'ID':<40} {'Name':<30} {'Format':<10}")
+		print("=" * 85)
+
+		for template in templates:
+			if isinstance(template, dict):
+				template_id = template.get('_id', template.get('id', 'N/A'))
+				template_name = template.get('name', template.get('title', 'Unnamed'))
+				template_format = template.get('format', template.get('contentType', 'N/A'))
+
+				# Truncate long IDs/names if needed
+				if len(template_id) > 38:
+					template_id = template_id[:35] + "..."
+				if len(template_name) > 28:
+					template_name = template_name[:25] + "..."
+
+				print(f"{template_id:<40} {template_name:<30} {template_format:<10}")
+
+				if DEBUG:
+					print(f"DEBUG: Template keys: {template.keys()}", file=sys.stderr)
+			else:
+				print(f"  {template}")
+
+		print("\nUsage:")
+		print("  ./thehive-cli -t CASE_NUMBER --render-report TEMPLATE_ID")
+		print("  ./thehive-cli -t CASE_NUMBER --render-report \"Template Name\"")
+
+		return True
+
+	except Exception as e:
+		print(f"✗ Error listing report templates: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+def render_case_report(api, case_id, template_id, output_file=None, json_output=False):
+	"""Render a case report using a template"""
+	if not json_output:
+		print("\n##################")
+		print("RENDER CASE REPORT")
+		print("##################\n")
+
+	try:
+		if DEBUG:
+			print(f"DEBUG: Rendering report for case_id: {case_id}", file=sys.stderr)
+			print(f"DEBUG: Template ID: {template_id}", file=sys.stderr)
+			print(f"DEBUG: Output file: {output_file}", file=sys.stderr)
+
+		if not json_output:
+			print(f"Rendering report for case {case_id} using template '{template_id}'...")
+
+		# Try different API endpoints that might work for report rendering
+		# TheHive5 API endpoint for rendering case reports
+		# Based on TheHive patterns, try these endpoints:
+		endpoints_to_try = [
+			f"/api/v1/case/{case_id}/report/render/{template_id}",
+			f"/api/v1/case/{case_id}/report/{template_id}",
+			f"/api/v1/case/{case_id}/render-report/{template_id}",
+		]
+
+		report_content = None
+		successful_endpoint = None
+
+		for endpoint in endpoints_to_try:
+			try:
+				if DEBUG:
+					print(f"DEBUG: Trying endpoint: {endpoint}", file=sys.stderr)
+
+				response = api.session.make_request("GET", endpoint)
+
+				if response:
+					report_content = response
+					successful_endpoint = endpoint
+					if DEBUG:
+						print(f"DEBUG: Success with endpoint: {endpoint}", file=sys.stderr)
+					break
+			except Exception as e:
+				if DEBUG:
+					print(f"DEBUG: Endpoint {endpoint} failed: {e}", file=sys.stderr)
+				continue
+
+		if report_content is None:
+			if json_output:
+				return {"success": False, "action": "render_report", "case_id": case_id, "template": template_id, "error": "Could not render report"}
+			print(f"✗ Error: Could not render report. Tried multiple API endpoints.")
+			print(f"  Please check that:")
+			print(f"    1. Template '{template_id}' exists in TheHive")
+			print(f"    2. The case {case_id} exists")
+			print(f"    3. You have permissions to generate reports")
+			return False
+
+		if DEBUG:
+			print(f"DEBUG: Report content type: {type(report_content)}", file=sys.stderr)
+			if isinstance(report_content, dict):
+				print(f"DEBUG: Report keys: {report_content.keys()}", file=sys.stderr)
+
+		# Extract the actual report content
+		# The response might be a dict with the report content in a specific field
+		if isinstance(report_content, dict):
+			# Try common field names
+			for field in ['content', 'report', 'html', 'data', 'body']:
+				if field in report_content:
+					report_content = report_content[field]
+					break
+
+		# Convert to string if needed
+		if not isinstance(report_content, str):
+			report_content = str(report_content)
+
+		# Output the report
+		if output_file:
+			with open(output_file, 'w', encoding='utf-8') as f:
+				f.write(report_content)
+			if json_output:
+				return {"success": True, "action": "render_report", "case_id": case_id, "template": template_id, "output_file": output_file}
+			print(f"✓ Report successfully rendered and saved to: {output_file}")
+			print(f"  Size: {len(report_content)} characters")
+		else:
+			if json_output:
+				return {"success": True, "action": "render_report", "case_id": case_id, "template": template_id, "content": report_content}
+			print("\n" + "="*80)
+			print("REPORT CONTENT")
+			print("="*80 + "\n")
+			print(report_content)
+			print("\n" + "="*80 + "\n")
+
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "render_report", "case_id": case_id, "template": template_id, "error": str(e)}
+		print(f"✗ Error rendering report: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+def add_comment_to_case(api, case_id, comment_text, json_output=False):
+	"""Add a comment to a case"""
+	if not json_output:
+		print("\n###############")
+		print("ADD COMMENT")
+		print("###############\n")
+
+	try:
+		if DEBUG:
+			print(f"DEBUG: Adding comment to case_id: {case_id}", file=sys.stderr)
+			print(f"DEBUG: Comment text length: {len(comment_text)} characters", file=sys.stderr)
+
+		# Create an InputComment object with the message
+		comment_obj = InputComment(message=comment_text)
+
+		if DEBUG:
+			print(f"DEBUG: Created InputComment object: {comment_obj}", file=sys.stderr)
+
+		# Create the comment using TheHive API
+		result = api.comment.create_in_case(case_id, comment=comment_obj)
+
+		if DEBUG:
+			print(f"DEBUG: Comment creation result: {result}", file=sys.stderr)
+
+		if json_output:
+			return {"success": True, "action": "add_comment", "case_id": case_id}
+
+		print(f"✓ Comment successfully added to case {case_id}")
+
+		# Show preview of the comment
+		preview = comment_text[:100] + "..." if len(comment_text) > 100 else comment_text
+		print(f"\nComment preview:")
+		print(f"  {preview}")
+
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "add_comment", "case_id": case_id, "error": str(e)}
+		print(f"✗ Error adding comment: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+def display_case_comments(api, case_id, json_output=False):
+	"""Display comments for a case"""
+	if not json_output:
+		print("\n###############")
+		print("CASE COMMENTS")
+		print("###############\n")
+
+	try:
+		if DEBUG:
+			print(f"DEBUG: Looking for comments for case_id: {case_id}", file=sys.stderr)
+
+		# Try direct API query to get comments for this case
+		comments = []
+
+		try:
+			if DEBUG:
+				print(f"DEBUG: Trying direct query API for case comments", file=sys.stderr)
+
+			query_payload = {
+				"query": [
+					{"_name": "getCase", "idOrName": case_id},
+					{"_name": "comments"}
+				]
+			}
+
+			comments_response = api.session.make_request("POST", "/api/v1/query", json=query_payload)
+			if comments_response:
+				comments = comments_response
+				if DEBUG:
+					print(f"DEBUG: Direct comments query returned {len(comments)} comments", file=sys.stderr)
+					if len(comments) > 0:
+						print(f"DEBUG: First comment keys: {comments[0].keys()}", file=sys.stderr)
+						print(f"DEBUG: First comment: {comments[0]}", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: Direct comments query failed: {e}", file=sys.stderr)
+				import traceback
+				traceback.print_exc()
+
+		# If direct query didn't work, try using api.comment with extraData filtering
+		if not comments:
+			if DEBUG:
+				print(f"DEBUG: Direct query failed, trying api.comment.find()", file=sys.stderr)
+
+			try:
+				all_comments = api.comment.find(filters=None)
+				if DEBUG:
+					print(f"DEBUG: Retrieved {len(all_comments)} total comments", file=sys.stderr)
+					if len(all_comments) > 0:
+						print(f"DEBUG: First comment keys: {all_comments[0].keys()}", file=sys.stderr)
+						print(f"DEBUG: First comment extraData: {all_comments[0].get('extraData')}", file=sys.stderr)
+
+				# Filter comments - check extraData for case reference
+				for comment in all_comments:
+					extra = comment.get('extraData', {})
+					# Check if extraData contains case reference
+					if isinstance(extra, dict):
+						if extra.get('case') == case_id or extra.get('caseId') == case_id:
+							comments.append(comment)
+						elif extra.get('case') == case_id.lstrip('~') or extra.get('caseId') == case_id.lstrip('~'):
+							comments.append(comment)
+
+				if DEBUG:
+					print(f"DEBUG: Found {len(comments)} comments after extraData filtering", file=sys.stderr)
+			except Exception as e:
+				if DEBUG:
+					print(f"DEBUG: Error with api.comment.find: {e}", file=sys.stderr)
+
+		if not comments or len(comments) == 0:
+			if json_output:
+				return {"mode": "comments", "case_id": case_id, "count": 0, "comments": []}
+			print("No comments found for this case.")
+			if DEBUG:
+				print(f"DEBUG: Final comment count is 0", file=sys.stderr)
+			return
+
+		# Now process and display comments
+		if DEBUG:
+			print(f"DEBUG: Processing {len(comments)} comments for display", file=sys.stderr)
+
+		# Sort by date (oldest first for comments)
+		sorted_comments = sorted(comments, key=lambda x: x.get('_createdAt', x.get('createdAt', 0)))
+
+		if json_output:
+			result = []
+			for idx, comment in enumerate(sorted_comments, 1):
+				timestamp_field = '_createdAt' if '_createdAt' in comment else 'createdAt'
+				creator_field = '_createdBy' if '_createdBy' in comment else 'createdBy'
+				c = {
+					"index": idx,
+					"created_at": format_timestamp(comment.get(timestamp_field)),
+					"created_by": comment.get(creator_field, ''),
+					"message": comment.get('message', ''),
+					"is_edited": comment.get('isEdited', False)
+				}
+				if '_updatedAt' in comment and comment.get('_updatedAt') != comment.get(timestamp_field):
+					c["updated_at"] = format_timestamp(comment['_updatedAt'])
+				result.append(c)
+			return {"mode": "comments", "case_id": case_id, "count": len(result), "comments": result}
+
+		for idx, comment in enumerate(sorted_comments, 1):
+			print(f"Comment #{idx}")
+			print("-" * 50)
+
+			# Created timestamp - check both _createdAt and createdAt
+			timestamp_field = '_createdAt' if '_createdAt' in comment else 'createdAt'
+			if timestamp_field in comment:
+				timestamp = comment[timestamp_field] / 1000
+				dt_object = datetime.fromtimestamp(int(timestamp))
+				print(f"  Date       : {dt_object.strftime('%Y-%m-%d %H:%M:%S')}")
+
+			# User who created the comment - check both _createdBy and createdBy
+			creator_field = '_createdBy' if '_createdBy' in comment else 'createdBy'
+			if creator_field in comment:
+				print(f"  Created By : {comment[creator_field]}")
+
+			# Comment message
+			if 'message' in comment:
+				# Handle multi-line messages
+				message = comment['message']
+				lines = message.split('\n')
+				if len(lines) == 1:
+					print(f"  Message    : {message}")
+				else:
+					print(f"  Message    :")
+					for line in lines:
+						print(f"               {line}")
+
+			# Updated timestamp if different from created
+			if '_updatedAt' in comment and timestamp_field in comment:
+				if comment['_updatedAt'] != comment[timestamp_field]:
+					timestamp = comment['_updatedAt'] / 1000
+					dt_object = datetime.fromtimestamp(int(timestamp))
+					print(f"  Updated    : {dt_object.strftime('%Y-%m-%d %H:%M:%S')}")
+
+			# Show if edited
+			if 'isEdited' in comment and comment['isEdited']:
+				print(f"  Edited     : Yes")
+
+			print()
+
+	except Exception as e:
+		print(f"Error retrieving comments: {e}")
+		if DEBUG:
+			import traceback
+			print(traceback.format_exc())
+
+def display_case_observables(api, case_id, case_number, json_output=False):
+	"""Display all observables for a case with full field detail"""
+	if not json_output:
+		print("\n###############")
+		print(f"OBSERVABLES - Case #{case_number}")
+		print("###############\n")
+
+	try:
+		observables = []
+
+		if DEBUG:
+			print(f"DEBUG: Fetching observables for case_id='{case_id}' case_number={case_number}", file=sys.stderr)
+
+		# Strategy 1: Query API (same pattern as comments/tasks — most reliable in TheHive5)
+		try:
+			query_payload = {
+				"query": [
+					{"_name": "getCase", "idOrName": case_id},
+					{"_name": "observables"}
+				]
+			}
+			if DEBUG:
+				print(f"DEBUG: Trying query API with payload: {query_payload}", file=sys.stderr)
+			obs_response = api.session.make_request("POST", "/api/v1/query", json=query_payload)
+			if DEBUG:
+				print(f"DEBUG: Query API response type: {type(obs_response)}, value: {obs_response}", file=sys.stderr)
+			if obs_response:
+				observables = obs_response
+				if DEBUG:
+					print(f"DEBUG: Got {len(observables)} observables from query API", file=sys.stderr)
+					if observables:
+						print(f"DEBUG: First observable keys: {list(observables[0].keys())}", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: Query API strategy failed: {e}", file=sys.stderr)
+				import traceback
+				traceback.print_exc(file=sys.stderr)
+
+		# Strategy 2: Direct REST endpoint
+		if not observables:
+			try:
+				endpoint = f"/api/v1/case/{case_id}/observable"
+				if DEBUG:
+					print(f"DEBUG: Trying REST endpoint: {endpoint}", file=sys.stderr)
+				obs_response = api.session.make_request("GET", endpoint)
+				if DEBUG:
+					print(f"DEBUG: REST endpoint response type: {type(obs_response)}, value: {obs_response}", file=sys.stderr)
+				if obs_response:
+					observables = obs_response
+					if DEBUG:
+						print(f"DEBUG: Got {len(observables)} observables from REST endpoint", file=sys.stderr)
+			except Exception as e:
+				if DEBUG:
+					print(f"DEBUG: REST endpoint strategy failed: {e}", file=sys.stderr)
+
+		# Strategy 3: case.get() — observables embedded in case object
+		if not observables:
+			try:
+				if DEBUG:
+					print(f"DEBUG: Trying case.get()", file=sys.stderr)
+				case_details = api.case.get(case_id)
+				if DEBUG:
+					print(f"DEBUG: case.get() keys: {list(case_details.keys())}", file=sys.stderr)
+				if "observables" in case_details and len(case_details["observables"]) > 0:
+					observables = case_details["observables"]
+					if DEBUG:
+						print(f"DEBUG: Got {len(observables)} observables from case.get()", file=sys.stderr)
+				else:
+					if DEBUG:
+						print(f"DEBUG: case.get() returned no 'observables' key or empty list", file=sys.stderr)
+			except Exception as e:
+				if DEBUG:
+					print(f"DEBUG: case.get() strategy failed: {e}", file=sys.stderr)
+
+		# Strategy 4: observable.find() with Parent filter
+		if not observables:
+			try:
+				from thehive4py.query.filters import Parent
+				if DEBUG:
+					print(f"DEBUG: Trying observable.find() with Parent filter", file=sys.stderr)
+				result = api.observable.find(filters=Parent("case", case_id))
+				if DEBUG:
+					print(f"DEBUG: observable.find() returned: {type(result)}, len={len(result) if result else 0}", file=sys.stderr)
+				if result:
+					observables = result
+					if DEBUG:
+						print(f"DEBUG: Got {len(observables)} observables from observable.find()", file=sys.stderr)
+			except Exception as e:
+				if DEBUG:
+					print(f"DEBUG: observable.find() strategy failed: {e}", file=sys.stderr)
+
+		if not observables:
+			if json_output:
+				return {"mode": "list_observables", "case_number": case_number, "case_id": case_id, "count": 0, "observables": []}
+			print("No observables found for this case.")
+			return
+
+		if json_output:
+			result = []
+			for obs in observables:
+				o = {
+					"_id": obs.get("_id", ""),
+					"dataType": obs.get("dataType", ""),
+					"data": obs.get("data", ""),
+					"ioc": obs.get("ioc", False),
+					"sighted": obs.get("sighted", False),
+					"tlp": obs.get("tlpLabel", obs.get("tlp", "")),
+					"pap": obs.get("papLabel", obs.get("pap", "")),
+					"tags": obs.get("tags", []),
+					"message": obs.get("message", ""),
+					"created_at": format_timestamp(obs.get("_createdAt")),
+					"created_by": obs.get("_createdBy", ""),
+				}
+				if obs.get("sightedAt"):
+					o["sighted_at"] = format_timestamp(obs["sightedAt"])
+				if obs.get("ignoreSimilarity") is not None:
+					o["ignore_similarity"] = obs["ignoreSimilarity"]
+				if obs.get("attachment"):
+					att = obs["attachment"]
+					o["attachment"] = {
+						"name": att.get("name", ""),
+						"size": att.get("size", 0),
+						"contentType": att.get("contentType", ""),
+					}
+				result.append(o)
+			return {"mode": "list_observables", "case_number": case_number, "case_id": case_id, "count": len(result), "observables": result}
+
+		# Text output
+		print(f"Found {len(observables)} observable(s):\n")
+		for idx, obs in enumerate(observables, 1):
+			print(f"Observable #{idx}")
+			print("-" * 50)
+			print(f"  Type       : {obs.get('dataType', 'N/A')}")
+
+			# File attachments have no 'data' field — show attachment metadata instead
+			if obs.get("dataType") == "file" and obs.get("attachment"):
+				att = obs["attachment"]
+				print(f"  File       : {att.get('name', 'N/A')}")
+				print(f"  Size       : {att.get('size', 0)} bytes")
+				print(f"  MIME       : {att.get('contentType', 'N/A')}")
+			elif obs.get("data"):
+				print(f"  Data       : {obs['data']}")
+
+			print(f"  IOC        : {'Yes' if obs.get('ioc') else 'No'}")
+			print(f"  Sighted    : {'Yes' if obs.get('sighted') else 'No'}")
+
+			tlp = obs.get("tlpLabel", obs.get("tlp", ""))
+			if tlp != "" and tlp is not None:
+				print(f"  TLP        : {tlp}")
+
+			pap = obs.get("papLabel", obs.get("pap", ""))
+			if pap != "" and pap is not None:
+				print(f"  PAP        : {pap}")
+
+			tags = obs.get("tags", [])
+			if tags:
+				print(f"  Tags       : {', '.join(tags)}")
+
+			message = obs.get("message", "")
+			if message:
+				print(f"  Message    : {message}")
+
+			if "_createdAt" in obs:
+				print(f"  Created    : {format_timestamp(obs['_createdAt'])}")
+			if "_createdBy" in obs:
+				print(f"  Created By : {obs['_createdBy']}")
+
+			print()
+
+	except Exception as e:
+		if json_output:
+			return {"mode": "list_observables", "case_number": case_number, "case_id": case_id, "count": 0, "observables": [], "error": str(e)}
+		print(f"Error retrieving observables: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+
+
+def display_case_pages(api, case_id, case_number, json_output=False):
+	"""Display all pages for a case with full content"""
+	if not json_output:
+		print("\n###############")
+		print(f"PAGES - Case #{case_number}")
+		print("###############\n")
+
+	try:
+		if DEBUG:
+			print(f"DEBUG: Fetching pages for case_id='{case_id}' case_number={case_number}", file=sys.stderr)
+
+		# Strategy 1: native helper (uses getCase -> pages query under the hood)
+		pages = []
+		try:
+			pages = api.case.find_pages(case_id, sortby=Asc("order"))
+			if DEBUG:
+				print(f"DEBUG: find_pages() returned {len(pages) if pages else 0} pages", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: find_pages() failed: {e}, falling back to raw query API", file=sys.stderr)
+			# Strategy 2: raw query API (same pattern as observables/comments)
+			try:
+				query_payload = {
+					"query": [
+						{"_name": "getCase", "idOrName": case_id},
+						{"_name": "pages"}
+					]
+				}
+				resp = api.session.make_request("POST", "/api/v1/query", json=query_payload)
+				if resp:
+					pages = resp
+			except Exception as e2:
+				if DEBUG:
+					print(f"DEBUG: raw query fallback failed: {e2}", file=sys.stderr)
+
+		if not pages:
+			if json_output:
+				return {"mode": "list_pages", "case_number": case_number, "case_id": case_id, "count": 0, "pages": []}
+			print("No pages found for this case.")
+			return
+
+		# Stable display order: by 'order' then title
+		pages = sorted(pages, key=lambda p: (p.get("order", 0), p.get("title", "")))
+
+		if json_output:
+			result = []
+			for p in pages:
+				entry = {
+					"_id": p.get("_id", ""),
+					"title": p.get("title", ""),
+					"category": p.get("category", ""),
+					"order": p.get("order", 0),
+					"content": p.get("content", ""),
+					"created_at": format_timestamp(p.get("_createdAt")),
+					"created_by": p.get("_createdBy", ""),
+				}
+				if p.get("_updatedAt"):
+					entry["updated_at"] = format_timestamp(p["_updatedAt"])
+				if p.get("_updatedBy"):
+					entry["updated_by"] = p["_updatedBy"]
+				result.append(entry)
+			return {"mode": "list_pages", "case_number": case_number, "case_id": case_id, "count": len(result), "pages": result}
+
+		# Text output
+		print(f"Found {len(pages)} page(s):\n")
+		for idx, p in enumerate(pages, 1):
+			print(f"Page #{idx}")
+			print("-" * 50)
+			print(f"  ID         : {p.get('_id', 'N/A')}")
+			print(f"  Title      : {p.get('title', 'N/A')}")
+			print(f"  Category   : {p.get('category', 'N/A')}")
+			print(f"  Order      : {p.get('order', 'N/A')}")
+			if "_createdAt" in p:
+				print(f"  Created    : {format_timestamp(p['_createdAt'])}")
+			if "_createdBy" in p:
+				print(f"  Created By : {p['_createdBy']}")
+			if p.get("_updatedAt"):
+				print(f"  Updated    : {format_timestamp(p['_updatedAt'])}")
+			content = p.get("content", "")
+			if content:
+				print(f"  Content    :")
+				for line in content.split("\n"):
+					print(f"               {line}")
+			print()
+
+	except Exception as e:
+		if json_output:
+			return {"mode": "list_pages", "case_number": case_number, "case_id": case_id, "count": 0, "pages": [], "error": str(e)}
+		print(f"Error retrieving pages: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+
+
+def add_page_to_case(api, case_id, title, content, category, order=None, json_output=False):
+	"""Create a page in a case"""
+	if not json_output:
+		print("\n###############")
+		print("ADD PAGE")
+		print("###############\n")
+
+	try:
+		# InputCasePage: title, content, category required; order optional
+		page = {"title": title, "content": content, "category": category}
+		if order is not None:
+			page["order"] = order
+
+		if DEBUG:
+			print(f"DEBUG: Creating page in case_id: {case_id}", file=sys.stderr)
+			print(f"DEBUG: Page fields: title={title!r} category={category!r} order={order} content_len={len(content)}", file=sys.stderr)
+
+		result = api.case.create_page(case_id, page=page)
+
+		if DEBUG:
+			print(f"DEBUG: create_page result: {result}", file=sys.stderr)
+
+		page_id = result.get("_id", "") if isinstance(result, dict) else ""
+
+		if json_output:
+			return {"success": True, "action": "add_page", "case_id": case_id, "page_id": page_id, "title": title, "category": category}
+
+		print(f"✓ Page successfully added to case {case_id}")
+		print(f"  Title    : {title}")
+		print(f"  Category : {category}")
+		if page_id:
+			print(f"  Page ID  : {page_id}")
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "add_page", "case_id": case_id, "error": str(e)}
+		print(f"✗ Error adding page: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def update_case_page(api, case_id, page_id, fields, json_output=False):
+	"""Update an existing page in a case (only the provided fields are changed)"""
+	if not json_output:
+		print("\n###############")
+		print("UPDATE PAGE")
+		print("###############\n")
+
+	try:
+		if DEBUG:
+			print(f"DEBUG: Updating page {page_id} in case_id: {case_id}", file=sys.stderr)
+			print(f"DEBUG: Update fields: {list(fields.keys())}", file=sys.stderr)
+
+		# InputUpdateCasePage: all fields optional; PATCH returns 204 (no body)
+		api.case.update_page(case_id, page_id, page=fields)
+
+		if json_output:
+			return {"success": True, "action": "update_page", "case_id": case_id, "page_id": page_id, "updated_fields": list(fields.keys())}
+
+		print(f"✓ Page {page_id} successfully updated in case {case_id}")
+		print(f"  Updated fields: {', '.join(fields.keys())}")
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "update_page", "case_id": case_id, "page_id": page_id, "error": str(e)}
+		print(f"✗ Error updating page: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def get_case_page(api, case_id, page_id):
+	"""Fetch a single page (matched by _id) belonging to a case. Returns the page dict or None."""
+	pages = []
+	try:
+		pages = api.case.find_pages(case_id)
+	except Exception as e:
+		if DEBUG:
+			print(f"DEBUG: find_pages() failed in get_case_page: {e}, trying raw query", file=sys.stderr)
+		try:
+			pages = api.session.make_request("POST", "/api/v1/query", json={
+				"query": [
+					{"_name": "getCase", "idOrName": case_id},
+					{"_name": "pages"}
+				]
+			})
+		except Exception as e2:
+			if DEBUG:
+				print(f"DEBUG: raw query failed in get_case_page: {e2}", file=sys.stderr)
+			pages = []
+	for p in (pages or []):
+		if p.get("_id") == page_id:
+			return p
+	return None
+
+
+def _launch_editor(buffer_text):
+	"""Write buffer_text to a temp file, open it in $EDITOR (then $VISUAL, then vi)
+	and return the edited text.
+
+	Returns None if the editor could not be launched or exited with a non-zero status.
+	"""
+	editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+	tmp_path = None
+	try:
+		fd, tmp_path = tempfile.mkstemp(suffix=".md", prefix="hive_edit_")
+		with os.fdopen(fd, "w", encoding="utf-8") as f:
+			f.write(buffer_text)
+
+		try:
+			cmd = shlex.split(editor) + [tmp_path]
+			if DEBUG:
+				print(f"DEBUG: Launching editor: {cmd}", file=sys.stderr)
+			rc = subprocess.call(cmd)
+		except FileNotFoundError:
+			print(f"✗ Error: editor '{editor}' not found. Set $EDITOR to a valid editor.")
+			return None
+		if rc != 0:
+			print(f"✗ Editor exited with status {rc}; aborting.")
+			return None
+
+		with open(tmp_path, encoding="utf-8") as f:
+			return f.read()
+	finally:
+		if tmp_path:
+			try:
+				os.unlink(tmp_path)
+			except OSError:
+				pass
+
+
+def _split_frontmatter(text):
+	"""Split editor text into (header_lines, body) on the first line that is exactly '---'.
+
+	Returns (None, None) if no separator line is found.
+	"""
+	lines = text.split("\n")
+	for i, ln in enumerate(lines):
+		if ln.strip() == "---":
+			return lines[:i], "\n".join(lines[i + 1:])
+	return None, None
+
+
+def compose_comment_interactively(initial=""):
+	"""Compose a comment in $EDITOR (markdown). The whole buffer is the comment - no
+	header/separator, so markdown headings ('#') are preserved. Returns the text, or
+	None if the buffer was left empty or the edit was aborted."""
+	edited = _launch_editor(initial or "")
+	if edited is None:
+		return None
+	text = edited.strip()
+	return text or None
+
+
+def check_lost_update(original, fields, refetch):
+	"""Lost-update guard for the read-modify-write interactive editors.
+
+	TheHive has no optimistic-concurrency control on field updates, so an interactive edit
+	(fetch -> sit in $EDITOR -> PATCH) can silently overwrite a change someone else made in
+	the meantime. Just before applying, re-fetch the entity (via refetch()) and check whether
+	any field we're about to change was modified since `original` was loaded.
+
+	Returns a dict {field: current_server_value} of conflicts, or {} if none / undetectable.
+	"""
+	try:
+		current = refetch()
+	except Exception as e:
+		if DEBUG:
+			print(f"DEBUG: lost-update re-fetch failed ({e}); skipping the check", file=sys.stderr)
+		return {}
+	if not current:
+		return {}
+
+	def _norm(v):
+		return v.rstrip("\n") if isinstance(v, str) else v
+
+	conflicts = {}
+	for f in fields:
+		if _norm(original.get(f)) != _norm(current.get(f)):
+			conflicts[f] = current.get(f)
+	return conflicts
+
+
+def report_lost_update(conflicts, update_fields, json_output=False):
+	"""Preserve the user's pending edit to a temp file and report a lost-update conflict.
+
+	Returns the save path (or None). The caller should abort after calling this.
+	"""
+	saved_path = None
+	try:
+		fd, saved_path = tempfile.mkstemp(suffix=".txt", prefix="thehive-edit-")
+		with os.fdopen(fd, "w", encoding="utf-8") as fh:
+			for f, v in update_fields.items():
+				fh.write(f"# {f}\n{v}\n\n")
+	except OSError:
+		saved_path = None
+
+	if not json_output:
+		print("✗ Not applied: the following field(s) changed in TheHive while you were editing:")
+		for f in conflicts:
+			print(f"    - {f}")
+		print("  Aborting to avoid overwriting someone else's change.")
+		if saved_path:
+			print(f"  Your edit was saved to: {saved_path}")
+		print("  Re-run with --interactive to reconcile against the current version.")
+	return saved_path
+
+
+def edit_page_interactively(page):
+	"""Open the page's fields in $EDITOR and return a dict of changed fields
+	suitable for InputUpdateCasePage.
+
+	Returns {} if nothing changed, or None if the edit was aborted / unparseable.
+	"""
+	orig_title = page.get("title", "")
+	orig_category = page.get("category", "")
+	orig_order = page.get("order", "")
+	orig_content = page.get("content", "")
+
+	buffer_text = "\n".join([
+		"# TheHive page editor. Edit the fields below, then save and exit.",
+		"# Lines in this header starting with '#' are ignored.",
+		"# The first line that is exactly '---' separates the header from the",
+		"# page content (everything below it is the markdown body).",
+		"# To abort, save the file unchanged or remove the '---' separator.",
+		f"Title: {orig_title}",
+		f"Category: {orig_category}",
+		f"Order: {orig_order}",
+		"---",
+		orig_content,
+	]) + "\n"
+
+	edited = _launch_editor(buffer_text)
+	if edited is None:
+		return None
+	# Unchanged buffer => nothing to do
+	if edited == buffer_text:
+		return {}
+
+	header_lines, new_content = _split_frontmatter(edited)
+	if header_lines is None:
+		print("✗ Could not find the '---' separator in the edited file; aborting (no changes applied).")
+		return None
+
+	new_title = orig_title
+	new_category = orig_category
+	new_order_str = str(orig_order)
+	for ln in header_lines:
+		s = ln.strip()
+		if not s or s.startswith("#"):
+			continue
+		key, sep, val = ln.partition(":")
+		if not sep:
+			continue
+		key = key.strip().lower()
+		val = val.strip()
+		if key == "title":
+			new_title = val
+		elif key == "category":
+			new_category = val
+		elif key == "order":
+			new_order_str = val
+
+	changed = {}
+	if new_title != orig_title:
+		changed["title"] = new_title
+	if new_category != orig_category:
+		changed["category"] = new_category
+
+	# order: compare as integers; a blank value leaves the order unchanged
+	new_order_str = new_order_str.strip()
+	if new_order_str != str(orig_order) and new_order_str != "":
+		try:
+			new_order = int(new_order_str)
+			if new_order != orig_order:
+				changed["order"] = new_order
+		except ValueError:
+			print(f"⚠ Ignoring invalid Order value '{new_order_str}' (must be an integer).")
+
+	# content: ignore differences that are only trailing newlines
+	if new_content.rstrip("\n") != orig_content.rstrip("\n"):
+		changed["content"] = new_content.rstrip("\n")
+
+	return changed
+
+
+def create_page_interactively(title="", category="", order="", content=""):
+	"""Open a new-page buffer in $EDITOR (seeded with any provided fields) and return an
+	InputCasePage dict {title, content, category[, order]}.
+
+	Returns None if aborted: empty title/content/category, missing '---' separator, or editor failure.
+	"""
+	buffer_text = "\n".join([
+		"# New TheHive case page. Fill in the fields below, then save and exit.",
+		"# Lines in this header starting with '#' are ignored.",
+		"# The first line that is exactly '---' separates the header from the",
+		"# page content (everything below it is the markdown body).",
+		"# Title, Category and content are required; leave them blank to abort.",
+		f"Title: {title}",
+		f"Category: {category}",
+		f"Order: {order}",
+		"---",
+		content,
+	]) + "\n"
+
+	edited = _launch_editor(buffer_text)
+	if edited is None:
+		return None
+
+	header_lines, new_content = _split_frontmatter(edited)
+	if header_lines is None:
+		print("✗ Could not find the '---' separator in the edited file; aborting (page not created).")
+		return None
+
+	new_title = ""
+	new_category = ""
+	new_order_str = ""
+	for ln in header_lines:
+		s = ln.strip()
+		if not s or s.startswith("#"):
+			continue
+		key, sep, val = ln.partition(":")
+		if not sep:
+			continue
+		key = key.strip().lower()
+		val = val.strip()
+		if key == "title":
+			new_title = val
+		elif key == "category":
+			new_category = val
+		elif key == "order":
+			new_order_str = val
+
+	new_content = new_content.rstrip("\n")
+
+	missing = [name for name, val in (("Title", new_title), ("Category", new_category), ("content", new_content)) if not val]
+	if missing:
+		print(f"✗ Missing required field(s): {', '.join(missing)}; aborting (page not created).")
+		return None
+
+	page = {"title": new_title, "content": new_content, "category": new_category}
+	if new_order_str:
+		try:
+			page["order"] = int(new_order_str)
+		except ValueError:
+			print(f"⚠ Ignoring invalid Order value '{new_order_str}' (must be an integer).")
+	return page
+
+
+def edit_case_interactively(case):
+	"""Open the case title + description in $EDITOR and return a dict of changed
+	fields suitable for InputUpdateCase.
+
+	Returns {} if nothing changed, or None if the edit was aborted / unparseable.
+	"""
+	orig_title = case.get("title", "")
+	orig_description = case.get("description", "")
+
+	buffer_text = "\n".join([
+		"# TheHive case editor. Edit the fields below, then save and exit.",
+		"# Lines in this header starting with '#' are ignored.",
+		"# The first line that is exactly '---' separates the header (Title)",
+		"# from the case description (everything below it is the markdown body).",
+		"# To abort, save the file unchanged or remove the '---' separator.",
+		f"Title: {orig_title}",
+		"---",
+		orig_description,
+	]) + "\n"
+
+	edited = _launch_editor(buffer_text)
+	if edited is None:
+		return None
+	# Unchanged buffer => nothing to do
+	if edited == buffer_text:
+		return {}
+
+	header_lines, new_description = _split_frontmatter(edited)
+	if header_lines is None:
+		print("✗ Could not find the '---' separator in the edited file; aborting (no changes applied).")
+		return None
+
+	new_title = orig_title
+	for ln in header_lines:
+		s = ln.strip()
+		if not s or s.startswith("#"):
+			continue
+		key, sep, val = ln.partition(":")
+		if not sep:
+			continue
+		if key.strip().lower() == "title":
+			new_title = val.strip()
+
+	changed = {}
+	if new_title != orig_title:
+		changed["title"] = new_title
+	# description: ignore differences that are only trailing newlines
+	if new_description.rstrip("\n") != orig_description.rstrip("\n"):
+		changed["description"] = new_description.rstrip("\n")
+
+	return changed
+
+
+def update_case_fields(api, case_id, case_number, fields, json_output=False):
+	"""Update fields of a case (only the provided fields are changed)"""
+	if not json_output:
+		print("\n###############")
+		print("UPDATE CASE")
+		print("###############\n")
+
+	try:
+		if DEBUG:
+			print(f"DEBUG: Updating case {case_number} (case_id={case_id})", file=sys.stderr)
+			print(f"DEBUG: Update fields: {list(fields.keys())}", file=sys.stderr)
+
+		# InputUpdateCase: all fields optional; PATCH returns 204 (no body)
+		api.case.update(case_id, fields=fields)
+
+		if json_output:
+			return {"success": True, "action": "update_case", "case_id": case_id, "number": case_number, "updated_fields": list(fields.keys())}
+
+		print(f"✓ Case {case_number} successfully updated")
+		print(f"  Updated fields: {', '.join(fields.keys())}")
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "update_case", "case_id": case_id, "number": case_number, "error": str(e)}
+		print(f"✗ Error updating case: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def create_case_interactively():
+	"""Open an empty new-case buffer in $EDITOR and return (title, description).
+
+	Returns None if aborted (empty title, missing '---' separator, or editor failure).
+	"""
+	buffer_text = "\n".join([
+		"# New TheHive case. Fill in the fields below, then save and exit.",
+		"# Lines in this header starting with '#' are ignored.",
+		"# The first line that is exactly '---' separates the header (Title)",
+		"# from the case description (everything below it is the markdown body).",
+		"# Leave the title blank (or remove the '---' separator) to abort.",
+		"Title: ",
+		"---",
+		"",
+	]) + "\n"
+
+	edited = _launch_editor(buffer_text)
+	if edited is None:
+		return None
+
+	header_lines, description = _split_frontmatter(edited)
+	if header_lines is None:
+		print("✗ Could not find the '---' separator in the edited file; aborting (case not created).")
+		return None
+
+	title = ""
+	for ln in header_lines:
+		s = ln.strip()
+		if not s or s.startswith("#"):
+			continue
+		key, sep, val = ln.partition(":")
+		if not sep:
+			continue
+		if key.strip().lower() == "title":
+			title = val.strip()
+
+	if not title:
+		print("✗ No title provided; aborting (case not created).")
+		return None
+
+	return title, description.rstrip("\n")
+
+
+def create_case(api, title, description, template=None, json_output=False):
+	"""Create a new case, optionally applying a case template by name."""
+	if not json_output:
+		print("\n###############")
+		print("CREATE CASE")
+		print("###############\n")
+
+	try:
+		# InputCase: title + description required; caseTemplate (name) expands server-side
+		case_body = {"title": title, "description": description}
+		if template:
+			case_body["caseTemplate"] = template
+
+		if DEBUG:
+			print(f"DEBUG: Creating case: title={title!r} template={template!r} desc_len={len(description)}", file=sys.stderr)
+
+		result = api.case.create(case_body)
+
+		if DEBUG:
+			print(f"DEBUG: create_case result: {result}", file=sys.stderr)
+
+		case_id = result.get("_id", "") if isinstance(result, dict) else ""
+		number = result.get("number", "") if isinstance(result, dict) else ""
+		url = THEHIVE_URL + "/cases/" + str(case_id) + "/details" if case_id else ""
+
+		if json_output:
+			out = {"success": True, "action": "create_case", "case_id": case_id, "number": number, "title": title, "url": url}
+			if template:
+				out["caseTemplate"] = template
+			return out
+
+		print(f"✓ Case created")
+		if number != "":
+			print(f"  Number   : {number}")
+		print(f"  Title    : {title}")
+		if template:
+			print(f"  Template : {template}")
+		if case_id:
+			print(f"  Case ID  : {case_id}")
+		if url:
+			print(f"  URL      : {url}")
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "create_case", "error": str(e)}
+		print(f"✗ Error creating case: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def list_case_templates(api, json_output=False):
+	"""List available case templates"""
+	if not json_output:
+		print("\n########################")
+		print("CASE TEMPLATES")
+		print("########################\n")
+
+	try:
+		templates = api.case_template.find(sortby=Asc("name"))
+
+		if not templates:
+			if json_output:
+				return {"mode": "list_case_templates", "count": 0, "templates": []}
+			print("No case templates found.")
+			return False
+
+		if json_output:
+			result = []
+			for t in templates:
+				result.append({
+					"name": t.get("name", ""),
+					"displayName": t.get("displayName", ""),
+					"titlePrefix": t.get("titlePrefix", ""),
+					"severity": severityToStr(t.get("severity", 0)),
+					"tags": t.get("tags", []),
+					"task_count": len(t.get("tasks", []) or []),
+				})
+			return {"mode": "list_case_templates", "count": len(result), "templates": result}
+
+		print(f"Found {len(templates)} case template(s):\n")
+		for idx, t in enumerate(templates, 1):
+			print(f"Template #{idx}")
+			print("-" * 50)
+			print(f"  Name        : {t.get('name', 'N/A')}")
+			if t.get("displayName"):
+				print(f"  Display Name: {t.get('displayName')}")
+			if t.get("titlePrefix"):
+				print(f"  Title Prefix: {t.get('titlePrefix')}")
+			print(f"  Severity    : {severityToStr(t.get('severity', 0))}")
+			tags = t.get("tags", [])
+			if tags:
+				print(f"  Tags        : {', '.join(tags)}")
+			print(f"  Tasks       : {len(t.get('tasks', []) or [])}")
+			print()
+
+		print("Usage:")
+		print("  ./thehive-cli --create-case --interactive --case-template \"Template Name\"")
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"mode": "list_case_templates", "count": 0, "templates": [], "error": str(e)}
+		print(f"✗ Error listing case templates: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def add_observables_interactively():
+	"""Open a line-based IOC table in $EDITOR and return a list of InputObservable dicts.
+
+	Returns None on editor failure; [] if the buffer contained no observable lines.
+	Line format:  <type>  <data>  [ioc] [sighted] [tags=a,b,c]
+	"""
+	buffer_text = "\n".join([
+		"# Add observables - one per line:  <type>  <data>  [ioc] [sighted] [tags=a,b,c]",
+		"# Lines starting with '#' are ignored. Save & exit to create; empty file aborts.",
+		"#",
+		"# examples:",
+		"#   ip       45.83.12.9        ioc tags=c2,emotet",
+		"#   domain   evil.example.com  ioc sighted",
+		"#   hash     d41d8cd98f00b204e9800998ecf8427e",
+		"",
+	]) + "\n"
+
+	edited = _launch_editor(buffer_text)
+	if edited is None:
+		return None
+
+	observables = []
+	for raw in edited.split("\n"):
+		line = raw.strip()
+		if not line or line.startswith("#"):
+			continue
+		tokens = line.split()
+		if len(tokens) < 2:
+			print(f"⚠ Skipping malformed line (need '<type> <data>'): {line!r}")
+			continue
+		obs = {"dataType": tokens[0], "data": tokens[1]}
+		tags = []
+		for tok in tokens[2:]:
+			low = tok.lower()
+			if low == "ioc":
+				obs["ioc"] = True
+			elif low == "sighted":
+				obs["sighted"] = True
+			elif tok.startswith("tags="):
+				tags = [t.strip() for t in tok[len("tags="):].split(",") if t.strip()]
+			else:
+				print(f"⚠ Ignoring unknown token '{tok}' on line: {line!r}")
+		if tags:
+			obs["tags"] = tags
+		observables.append(obs)
+
+	return observables
+
+
+def add_observables_to_case(api, case_id, observables, json_output=False):
+	"""Create one or more observables in a case.
+
+	`observables` is a list of InputObservable dicts; a dict may carry a special
+	"_path" key for a file observable (popped and passed as observable_path).
+	"""
+	if not json_output:
+		print("\n###############")
+		print("ADD OBSERVABLE(S)")
+		print("###############\n")
+
+	created = []
+	errors = []
+	for obs in observables:
+		path = obs.pop("_path", None)
+		try:
+			if DEBUG:
+				print(f"DEBUG: Creating observable: {obs} path={path}", file=sys.stderr)
+			res = api.case.create_observable(case_id, obs, observable_path=path)
+			if res:
+				created.extend(res)
+		except Exception as e:
+			errors.append({"dataType": obs.get("dataType"), "data": obs.get("data"), "error": str(e)})
+			if DEBUG:
+				import traceback
+				traceback.print_exc()
+
+	if json_output:
+		out = {
+			"success": len(errors) == 0,
+			"action": "add_observable",
+			"case_id": case_id,
+			"created_count": len(created),
+			"created": [{"_id": o.get("_id", ""), "dataType": o.get("dataType", ""), "data": o.get("data", "")} for o in created],
+		}
+		if errors:
+			out["errors"] = errors
+		return out
+
+	print(f"✓ Created {len(created)} observable(s) in case {case_id}")
+	for o in created:
+		val = o.get("data")
+		if not val and isinstance(o.get("attachment"), dict):
+			val = o["attachment"].get("name", "")
+		print(f"  [{o.get('dataType', '?')}] {val}")
+	if errors:
+		print(f"\n✗ {len(errors)} failed:")
+		for e in errors:
+			print(f"  [{e['dataType']}] {e['data']}: {e['error']}")
+	return len(errors) == 0
+
+
+def parse_datetime_to_ms(s):
+	"""Parse 'YYYY-MM-DD HH:MM[:SS]' (local time), 'YYYY-MM-DD', or epoch-ms into epoch-ms.
+
+	Returns None if the value cannot be parsed.
+	"""
+	s = s.strip()
+	if not s:
+		return None
+	if s.isdigit():
+		return int(s)
+	for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+		try:
+			return int(datetime.strptime(s, fmt).timestamp() * 1000)
+		except ValueError:
+			continue
+	return None
+
+
+def _is_custom_event(ev):
+	"""Heuristic: does this timeline event represent a user-authored custom event?"""
+	entity = str(ev.get("entity", "")).lower()
+	kind = str(ev.get("kind", "")).lower()
+	return "custom" in entity or "custom" in kind
+
+
+def _timeline_events(api, case_id):
+	"""Return the list of raw timeline event dicts for a case (or [])."""
+	tl = api.timeline.get(case_id)
+	if isinstance(tl, str):
+		tl = json.loads(tl)
+	if isinstance(tl, dict):
+		return tl.get("events", []) or []
+	return tl or []
+
+
+def display_case_events(api, case_id, case_number, json_output=False):
+	"""List custom timeline events for a case (with their IDs, for --update/--delete-event)."""
+	if not json_output:
+		print("\n###############")
+		print(f"TIMELINE EVENTS - Case #{case_number}")
+		print("###############\n")
+
+	try:
+		events = _timeline_events(api, case_id)
+		if DEBUG:
+			kinds = sorted({f"{ev.get('entity')}/{ev.get('kind')}" for ev in events})
+			print(f"DEBUG: {len(events)} timeline events; entity/kind seen: {kinds}", file=sys.stderr)
+
+		custom = [ev for ev in events if _is_custom_event(ev)]
+
+		if not custom:
+			if json_output:
+				return {"mode": "list_events", "case_number": case_number, "case_id": case_id, "count": 0, "events": []}
+			print("No custom timeline events found for this case.")
+			return False
+
+		custom.sort(key=lambda ev: ev.get("date", 0))
+
+		def _event_view(ev):
+			details = ev.get("details") or {}
+			return {
+				"_id": ev.get("entityId", ""),
+				"title": details.get("title", ev.get("title", "")),
+				"description": details.get("description", ev.get("description", "")),
+				"date": format_timestamp(ev.get("date")),
+				"end_date": format_timestamp(ev.get("endDate")) if ev.get("endDate") else "",
+			}
+
+		if json_output:
+			return {"mode": "list_events", "case_number": case_number, "case_id": case_id,
+			        "count": len(custom), "events": [_event_view(ev) for ev in custom]}
+
+		print(f"Found {len(custom)} custom event(s):\n")
+		for idx, ev in enumerate(custom, 1):
+			v = _event_view(ev)
+			print(f"Event #{idx}")
+			print("-" * 50)
+			print(f"  ID         : {v['_id']}")
+			print(f"  Title      : {v['title']}")
+			print(f"  Date       : {v['date']}")
+			if v["end_date"]:
+				print(f"  End Date   : {v['end_date']}")
+			if v["description"]:
+				print(f"  Description: {v['description']}")
+			print()
+		return True
+
+	except Exception as e:
+		if json_output:
+			return {"mode": "list_events", "case_number": case_number, "case_id": case_id, "count": 0, "events": [], "error": str(e)}
+		print(f"✗ Error retrieving timeline events: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def get_case_event(api, case_id, event_id):
+	"""Fetch a single custom timeline event (by id) as {_id,title,description,date,endDate}, or None."""
+	try:
+		events = _timeline_events(api, case_id)
+	except Exception as e:
+		if DEBUG:
+			print(f"DEBUG: get_case_event timeline fetch failed: {e}", file=sys.stderr)
+		return None
+	for ev in events:
+		if ev.get("entityId") == event_id and _is_custom_event(ev):
+			details = ev.get("details") or {}
+			return {
+				"_id": event_id,
+				"title": details.get("title", ev.get("title", "")),
+				"description": details.get("description", ev.get("description", "")),
+				"date": ev.get("date"),
+				"endDate": ev.get("endDate"),
+			}
+	return None
+
+
+def _parse_event_header(header_lines):
+	"""Parse Title/Date/EndDate from editor header lines into a dict of strings."""
+	out = {"title": "", "date_str": "", "end_str": ""}
+	for ln in header_lines:
+		s = ln.strip()
+		if not s or s.startswith("#"):
+			continue
+		key, sep, val = ln.partition(":")
+		if not sep:
+			continue
+		k = key.strip().lower()
+		v = val.strip()
+		if k == "title":
+			out["title"] = v
+		elif k == "date":
+			out["date_str"] = v
+		elif k == "enddate":
+			out["end_str"] = v
+	return out
+
+
+def _event_buffer(title, date_ms, end_ms, description):
+	"""Build the front-matter editor buffer for a timeline event."""
+	return "\n".join([
+		"# TheHive timeline event. Edit the fields below, then save and exit.",
+		"# Lines in this header starting with '#' are ignored.",
+		"# Date/EndDate: 'YYYY-MM-DD HH:MM[:SS]' (local) or epoch-ms. EndDate is optional.",
+		"# The first line that is exactly '---' separates the header from the description.",
+		"# To abort, save unchanged or remove the '---' separator.",
+		f"Title: {title}",
+		f"Date: {format_timestamp(date_ms) if date_ms else ''}",
+		f"EndDate: {format_timestamp(end_ms) if end_ms else ''}",
+		"---",
+		description,
+	]) + "\n"
+
+
+def create_event_interactively():
+	"""Open an empty timeline-event buffer in $EDITOR and return an InputCustomEvent dict.
+
+	Returns None if aborted (empty title, missing separator, bad date, or editor failure).
+	"""
+	edited = _launch_editor(_event_buffer("", None, None, ""))
+	if edited is None:
+		return None
+
+	header_lines, description = _split_frontmatter(edited)
+	if header_lines is None:
+		print("✗ Could not find the '---' separator in the edited file; aborting (event not created).")
+		return None
+
+	f = _parse_event_header(header_lines)
+	title = f["title"].strip()
+	if not title:
+		print("✗ No title provided; aborting (event not created).")
+		return None
+
+	if f["date_str"] == "":
+		date_ms = int(datetime.now().timestamp() * 1000)
+	else:
+		date_ms = parse_datetime_to_ms(f["date_str"])
+		if date_ms is None:
+			print(f"✗ Could not parse Date '{f['date_str']}'; aborting (event not created).")
+			return None
+
+	event = {"date": date_ms, "title": title}
+	desc = description.rstrip("\n")
+	if desc:
+		event["description"] = desc
+	if f["end_str"]:
+		end_ms = parse_datetime_to_ms(f["end_str"])
+		if end_ms is None:
+			print(f"✗ Could not parse EndDate '{f['end_str']}'; aborting (event not created).")
+			return None
+		event["endDate"] = end_ms
+	return event
+
+
+def edit_event_interactively(event):
+	"""Open a custom event in $EDITOR and return a dict of changed fields (InputUpdateCustomEvent).
+
+	Returns {} if nothing changed, or None if aborted / unparseable / bad date.
+	"""
+	orig_title = event.get("title", "")
+	orig_date = event.get("date")
+	orig_end = event.get("endDate")
+	orig_desc = event.get("description", "")
+
+	buffer_text = _event_buffer(orig_title, orig_date, orig_end, orig_desc)
+	edited = _launch_editor(buffer_text)
+	if edited is None:
+		return None
+	if edited == buffer_text:
+		return {}
+
+	header_lines, new_desc = _split_frontmatter(edited)
+	if header_lines is None:
+		print("✗ Could not find the '---' separator in the edited file; aborting (no changes applied).")
+		return None
+
+	f = _parse_event_header(header_lines)
+	changed = {}
+
+	new_title = f["title"].strip() or orig_title
+	if new_title != orig_title:
+		changed["title"] = new_title
+
+	if f["date_str"] != "":
+		new_date = parse_datetime_to_ms(f["date_str"])
+		if new_date is None:
+			print(f"✗ Could not parse Date '{f['date_str']}'; aborting (no changes applied).")
+			return None
+		if new_date != orig_date:
+			changed["date"] = new_date
+
+	if f["end_str"] != "":
+		new_end = parse_datetime_to_ms(f["end_str"])
+		if new_end is None:
+			print(f"✗ Could not parse EndDate '{f['end_str']}'; aborting (no changes applied).")
+			return None
+		if new_end != orig_end:
+			changed["endDate"] = new_end
+
+	if new_desc.rstrip("\n") != (orig_desc or "").rstrip("\n"):
+		changed["description"] = new_desc.rstrip("\n")
+
+	return changed
+
+
+def add_case_event(api, case_id, case_number, event, json_output=False):
+	"""Create a custom timeline event in a case."""
+	if not json_output:
+		print("\n###############")
+		print("ADD TIMELINE EVENT")
+		print("###############\n")
+	try:
+		if DEBUG:
+			print(f"DEBUG: Creating timeline event in case {case_number}: {event}", file=sys.stderr)
+		result = api.timeline.create_event(case_id, event=event)
+		if DEBUG:
+			print(f"DEBUG: create_event result: {result}", file=sys.stderr)
+		event_id = result.get("_id", "") if isinstance(result, dict) else ""
+		if json_output:
+			return {"success": True, "action": "add_event", "case_id": case_id, "number": case_number,
+			        "event_id": event_id, "title": event.get("title", ""), "date": format_timestamp(event.get("date"))}
+		print(f"✓ Timeline event added to case {case_number}")
+		print(f"  Title : {event.get('title', '')}")
+		print(f"  Date  : {format_timestamp(event.get('date'))}")
+		if event_id:
+			print(f"  ID    : {event_id}")
+		return True
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "add_event", "case_id": case_id, "number": case_number, "error": str(e)}
+		print(f"✗ Error adding timeline event: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def update_case_event(api, event_id, fields, json_output=False):
+	"""Update a custom timeline event (only the provided fields are changed)."""
+	if not json_output:
+		print("\n###############")
+		print("UPDATE TIMELINE EVENT")
+		print("###############\n")
+	try:
+		if DEBUG:
+			print(f"DEBUG: Updating timeline event {event_id}: {list(fields.keys())}", file=sys.stderr)
+		api.timeline.update_event(event_id, fields=fields)
+		if json_output:
+			return {"success": True, "action": "update_event", "event_id": event_id, "updated_fields": list(fields.keys())}
+		print(f"✓ Timeline event {event_id} updated")
+		print(f"  Updated fields: {', '.join(fields.keys())}")
+		return True
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "update_event", "event_id": event_id, "error": str(e)}
+		print(f"✗ Error updating timeline event: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def delete_case_event(api, event_id, json_output=False):
+	"""Delete a custom timeline event by id."""
+	if not json_output:
+		print("\n###############")
+		print("DELETE TIMELINE EVENT")
+		print("###############\n")
+	try:
+		if DEBUG:
+			print(f"DEBUG: Deleting timeline event {event_id}", file=sys.stderr)
+		api.timeline.delete_event(event_id)
+		if json_output:
+			return {"success": True, "action": "delete_event", "event_id": event_id}
+		print(f"✓ Timeline event {event_id} deleted")
+		return True
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "delete_event", "event_id": event_id, "error": str(e)}
+		print(f"✗ Error deleting timeline event: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def whoami(api, json_output=False):
+	"""Show the current API user (a quick credential/connectivity check)."""
+	try:
+		me = api.user.get_current()
+	except Exception as e:
+		if json_output:
+			return {"mode": "whoami", "error": str(e)}
+		print(f"✗ Error fetching current user: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+	if json_output:
+		return {
+			"mode": "whoami",
+			"login": me.get("login", ""),
+			"name": me.get("name", ""),
+			"email": me.get("email", ""),
+			"organisation": me.get("organisation", ""),
+			"profile": me.get("profile", ""),
+			"type": me.get("type", ""),
+			"locked": me.get("locked", False),
+			"permissions": me.get("permissions", []),
+		}
+
+	print("\n###############")
+	print("CURRENT USER")
+	print("###############\n")
+	print(f"  Login        : {me.get('login', 'N/A')}")
+	if me.get("name"):
+		print(f"  Name         : {me.get('name')}")
+	if me.get("email"):
+		print(f"  Email        : {me.get('email')}")
+	print(f"  Organisation : {me.get('organisation', 'N/A')}")
+	print(f"  Profile      : {me.get('profile', 'N/A')}")
+	if me.get("type"):
+		print(f"  Type         : {me.get('type')}")
+	perms = me.get("permissions") or []
+	if perms:
+		more = ", ..." if len(perms) > 6 else ""
+		print(f"  Permissions  : {len(perms)} ({', '.join(perms[:6])}{more})")
+	return True
+
+
+def list_case_attachments(api, case_id, case_number, json_output=False):
+	"""List a case's attachments (with IDs, for --download-attachment)."""
+	if not json_output:
+		print("\n###############")
+		print(f"ATTACHMENTS - Case #{case_number}")
+		print("###############\n")
+	try:
+		attachments = api.case.find_attachments(case_id) or []
+	except Exception as e:
+		if json_output:
+			return {"mode": "list_attachments", "case_number": case_number, "case_id": case_id, "count": 0, "attachments": [], "error": str(e)}
+		print(f"✗ Error retrieving attachments: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+	if json_output:
+		result = [{
+			"_id": a.get("_id", ""),
+			"name": a.get("name", ""),
+			"size": a.get("size", 0),
+			"contentType": a.get("contentType", ""),
+			"created_at": format_timestamp(a.get("_createdAt")),
+			"created_by": a.get("_createdBy", ""),
+		} for a in attachments]
+		return {"mode": "list_attachments", "case_number": case_number, "case_id": case_id, "count": len(result), "attachments": result}
+
+	if not attachments:
+		print("No attachments found for this case.")
+		return True
+	print(f"Found {len(attachments)} attachment(s):\n")
+	for idx, a in enumerate(attachments, 1):
+		print(f"Attachment #{idx}")
+		print("-" * 50)
+		print(f"  ID         : {a.get('_id', 'N/A')}")
+		print(f"  Name       : {a.get('name', 'N/A')}")
+		print(f"  Size       : {a.get('size', 0)} bytes")
+		print(f"  MIME       : {a.get('contentType', 'N/A')}")
+		if a.get("_createdAt"):
+			print(f"  Created    : {format_timestamp(a.get('_createdAt'))}")
+		print()
+	print(f"Download with:  ./thehive-cli -t {case_number} --download-attachment <ID> [--output-file PATH]")
+	return True
+
+
+def download_case_attachment(api, case_id, case_number, attachment_id, output_file=None, json_output=False):
+	"""Download a single case attachment by id (to --output-file, else its original name)."""
+	if not json_output:
+		print("\n###############")
+		print("DOWNLOAD ATTACHMENT")
+		print("###############\n")
+	try:
+		# Resolve the original filename for the default output path
+		name = None
+		try:
+			for a in (api.case.find_attachments(case_id) or []):
+				if a.get("_id") == attachment_id:
+					name = a.get("name")
+					break
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: could not list attachments to resolve name: {e}", file=sys.stderr)
+		out_path = output_file or name or attachment_id
+		if DEBUG:
+			print(f"DEBUG: downloading attachment {attachment_id} -> {out_path}", file=sys.stderr)
+		api.organisation.download_attachment(attachment_id, out_path)
+		size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+		if json_output:
+			return {"success": True, "action": "download_attachment", "case_id": case_id, "attachment_id": attachment_id, "output_file": out_path, "size": size}
+		print(f"✓ Downloaded attachment {attachment_id}")
+		print(f"  Saved to : {out_path}")
+		print(f"  Size     : {size} bytes")
+		return True
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "download_attachment", "case_id": case_id, "attachment_id": attachment_id, "error": str(e)}
+		print(f"✗ Error downloading attachment: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def export_case(api, case_id, case_number, password, output_file=None, json_output=False):
+	"""Export a case to an encrypted .thar archive (re-importable into another TheHive)."""
+	if not json_output:
+		print("\n###############")
+		print("EXPORT CASE")
+		print("###############\n")
+	out_path = output_file or f"case-{case_number}.thar"
+	try:
+		if DEBUG:
+			print(f"DEBUG: exporting case {case_number} -> {out_path}", file=sys.stderr)
+		api.case.export_to_file(case_id, password, out_path)
+		size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+		if json_output:
+			return {"success": True, "action": "export_case", "case_id": case_id, "number": case_number, "output_file": out_path, "size": size}
+		print(f"✓ Case {case_number} exported")
+		print(f"  Saved to : {out_path}")
+		print(f"  Size     : {size} bytes")
+		print("  Note     : encrypted .thar archive; import elsewhere with the same password")
+		return True
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "export_case", "case_id": case_id, "number": case_number, "error": str(e)}
+		print(f"✗ Error exporting case: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def export_case_to_misp(api, case_id, case_number, misp_name, json_output=False):
+	"""Export a case to a configured MISP server (by connector name)."""
+	if not json_output:
+		print("\n###############")
+		print("EXPORT CASE TO MISP")
+		print("###############\n")
+	try:
+		if DEBUG:
+			print(f"DEBUG: exporting case {case_number} to MISP server '{misp_name}'", file=sys.stderr)
+		api.misp.export_case(case_id, misp_name)
+		if json_output:
+			return {"success": True, "action": "export_misp", "case_id": case_id, "number": case_number, "misp_server": misp_name}
+		print(f"✓ Case {case_number} exported to MISP server '{misp_name}'")
+		return True
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "export_misp", "case_id": case_id, "number": case_number, "misp_server": misp_name, "error": str(e)}
+		print(f"✗ Error exporting case to MISP: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def list_case_tasks(api, case_id, case_number, json_output=False):
+	"""List tasks for a case."""
+	if not json_output:
+		print("\n###############")
+		print(f"TASKS - Case #{case_number}")
+		print("###############\n")
+	try:
+		tasks = api.case.find_tasks(case_id, sortby=Asc("order")) or []
+	except Exception as e:
+		if json_output:
+			return {"mode": "list_tasks", "case_number": case_number, "case_id": case_id, "count": 0, "tasks": [], "error": str(e)}
+		print(f"✗ Error retrieving tasks: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+	if json_output:
+		result = [{
+			"_id": t.get("_id", ""),
+			"title": t.get("title", ""),
+			"group": t.get("group", ""),
+			"status": t.get("status", ""),
+			"assignee": t.get("assignee", ""),
+			"flag": t.get("flag", False),
+			"description": t.get("description", ""),
+			"created_at": format_timestamp(t.get("_createdAt")),
+		} for t in tasks]
+		return {"mode": "list_tasks", "case_number": case_number, "case_id": case_id, "count": len(result), "tasks": result}
+
+	if not tasks:
+		print("No tasks found for this case.")
+		return True
+	print(f"Found {len(tasks)} task(s):\n")
+	for idx, t in enumerate(tasks, 1):
+		print(f"Task #{idx}")
+		print("-" * 50)
+		print(f"  ID         : {t.get('_id', 'N/A')}")
+		print(f"  Title      : {t.get('title', 'N/A')}")
+		if t.get("group"):
+			print(f"  Group      : {t.get('group')}")
+		print(f"  Status     : {t.get('status', 'N/A')}")
+		if t.get("assignee"):
+			print(f"  Assignee   : {t.get('assignee')}")
+		if t.get("description"):
+			print(f"  Description: {t.get('description')}")
+		print()
+	print(f"Add a work log:  ./thehive-cli -t {case_number} --add-task-log <TASK_ID> --interactive")
+	return True
+
+
+def add_task_to_case(api, case_id, case_number, task, json_output=False):
+	"""Create a task in a case (task is an InputTask dict)."""
+	if not json_output:
+		print("\n###############")
+		print("ADD TASK")
+		print("###############\n")
+	try:
+		if DEBUG:
+			print(f"DEBUG: creating task in case {case_number}: {task}", file=sys.stderr)
+		result = api.case.create_task(case_id, task=task)
+		task_id = result.get("_id", "") if isinstance(result, dict) else ""
+		if json_output:
+			return {"success": True, "action": "add_task", "case_id": case_id, "number": case_number, "task_id": task_id, "title": task.get("title", "")}
+		print(f"✓ Task added to case {case_number}")
+		print(f"  Title : {task.get('title', '')}")
+		if task.get("group"):
+			print(f"  Group : {task.get('group')}")
+		if task_id:
+			print(f"  ID    : {task_id}")
+		return True
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "add_task", "case_id": case_id, "number": case_number, "error": str(e)}
+		print(f"✗ Error adding task: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def add_task_log(api, task_id, message, json_output=False):
+	"""Add a work-log entry (message) to a task."""
+	if not json_output:
+		print("\n###############")
+		print("ADD TASK LOG")
+		print("###############\n")
+	try:
+		if DEBUG:
+			print(f"DEBUG: adding log to task {task_id} (len={len(message)})", file=sys.stderr)
+		result = api.task.create_log(task_id, task_log={"message": message})
+		log_id = result.get("_id", "") if isinstance(result, dict) else ""
+		if json_output:
+			return {"success": True, "action": "add_task_log", "task_id": task_id, "log_id": log_id}
+		print(f"✓ Work log added to task {task_id}")
+		preview = message[:100] + "..." if len(message) > 100 else message
+		print(f"  {preview}")
+		return True
+	except Exception as e:
+		if json_output:
+			return {"success": False, "action": "add_task_log", "task_id": task_id, "error": str(e)}
+		print(f"✗ Error adding task log: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+		return False
+
+
+def create_task_interactively(title="", group="", description=""):
+	"""Compose a new task in $EDITOR (Title/Group header + description body).
+	Returns an InputTask dict, or None if aborted (blank title / no separator / editor failure)."""
+	buffer_text = "\n".join([
+		"# New TheHive task. Fill in the fields below, then save and exit.",
+		"# Lines in this header starting with '#' are ignored.",
+		"# The first line that is exactly '---' separates the header from the",
+		"# task description (everything below it is the markdown body).",
+		"# Title is required; leave it blank to abort.",
+		f"Title: {title}",
+		f"Group: {group}",
+		"---",
+		description,
+	]) + "\n"
+
+	edited = _launch_editor(buffer_text)
+	if edited is None:
+		return None
+	header_lines, new_description = _split_frontmatter(edited)
+	if header_lines is None:
+		print("✗ Could not find the '---' separator in the edited file; aborting (task not created).")
+		return None
+
+	new_title = ""
+	new_group = ""
+	for ln in header_lines:
+		s = ln.strip()
+		if not s or s.startswith("#"):
+			continue
+		key, sep, val = ln.partition(":")
+		if not sep:
+			continue
+		key = key.strip().lower()
+		val = val.strip()
+		if key == "title":
+			new_title = val
+		elif key == "group":
+			new_group = val
+
+	if not new_title:
+		print("✗ No title provided; aborting (task not created).")
+		return None
+	task = {"title": new_title}
+	if new_group:
+		task["group"] = new_group
+	desc = new_description.rstrip("\n")
+	if desc:
+		task["description"] = desc
+	return task
+
+
+def display_alerts(api, filters=None, show_description=False, json_output=False):
+	"""Display list of alerts"""
+	if not json_output:
+		print("###############")
+		print("ALERTS")
+		print("###############\n")
+
+	try:
+		if DEBUG:
+			print(f"DEBUG: Fetching alerts with filters: {filters}", file=sys.stderr)
+
+		# Query alerts
+		from thehive4py.query.sort import Desc
+		alerts = api.alert.find(filters=filters, sortby=Desc("_createdAt"))
+
+		if DEBUG:
+			print(f"DEBUG: Found {len(alerts)} alerts", file=sys.stderr)
+			if len(alerts) > 0:
+				print(f"DEBUG: First alert keys: {alerts[0].keys()}", file=sys.stderr)
+				print(f"DEBUG: First alert status: '{alerts[0].get('status')}'", file=sys.stderr)
+
+		if not alerts or len(alerts) == 0:
+			if json_output:
+				return {"mode": "list_alerts", "count": 0, "alerts": []}
+			print("No alerts found that matched the criteria.")
+			return
+
+		if json_output:
+			result = []
+			for alert in alerts:
+				_id = alert.get("_id", "")
+				a = {
+					"_id": _id,
+					"title": alert.get("title", ""),
+					"source": alert.get("source", ""),
+					"severity": severityToStr(alert.get("severity", 0)),
+					"status": alert.get("status", ""),
+					"tlp": alert.get("tlpLabel", alert.get("tlp", "")),
+					"created_at": format_timestamp(alert.get("_createdAt")),
+					"created_by": alert.get("_createdBy", ""),
+					"type": alert.get("type", ""),
+					"source_ref": alert.get("sourceRef", ""),
+					"tags": alert.get("tags", []),
+					"url": THEHIVE_URL + f"/alerts/{_id}/details"
+				}
+				if show_description:
+					a["description"] = alert.get("description", "")
+				result.append(a)
+			return {"mode": "list_alerts", "count": len(result), "alerts": result}
+
+		print(f"Found {len(alerts)} alerts:\n")
+
+		for idx, alert in enumerate(alerts, 1):
+			print(f"Alert #{idx}")
+			print("-" * 50)
+
+			# Alert title
+			if "title" in alert:
+				print(f"  Title      : {alert['title']}")
+
+			# Source
+			if "source" in alert:
+				print(f"  Source     : {alert['source']}")
+
+			# Severity
+			if "severity" in alert:
+				severity_str = severityToStr(alert['severity'])
+				print(f"  Severity   : {severity_str}")
+
+			# Status
+			if "status" in alert:
+				print(f"  Status     : {alert['status']}")
+
+			# TLP
+			if "tlpLabel" in alert:
+				print(f"  TLP        : {alert['tlpLabel']}")
+			elif "tlp" in alert:
+				print(f"  TLP        : {alert['tlp']}")
+
+			# Created timestamp
+			if "_createdAt" in alert:
+				timestamp = alert['_createdAt'] / 1000
+				dt_object = datetime.fromtimestamp(int(timestamp))
+				print(f"  Created    : {dt_object.strftime('%Y-%m-%d %H:%M:%S')}")
+
+			# Created by
+			if "_createdBy" in alert:
+				print(f"  Created By : {alert['_createdBy']}")
+
+			# Type
+			if "type" in alert:
+				print(f"  Type       : {alert['type']}")
+
+			# Source reference
+			if "sourceRef" in alert:
+				print(f"  Source Ref : {alert['sourceRef']}")
+
+			# Description if requested
+			if show_description and "description" in alert:
+				desc = alert['description']
+				if len(desc) > 200:
+					desc = desc[:200] + "..."
+				print(f"  Description: {desc}")
+
+			# Tags
+			if "tags" in alert and len(alert['tags']) > 0:
+				tags_str = ", ".join(alert['tags'])
+				print(f"  Tags       : {tags_str}")
+
+			# URL
+			if "_id" in alert:
+				alert_url = THEHIVE_URL + f"/alerts/{alert['_id']}/details"
+				print(f"  URL        : {alert_url}")
+
+			print()
+
+	except Exception as e:
+		print(f"Error retrieving alerts: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+
+def display_case_live_feed(api, case_id, case_number, json_output=False):
+	"""Display live feed (recent activities) for a specific case"""
+	if not json_output:
+		print("\n###############")
+		print(f"LIVE FEED - Case #{case_number}")
+		print("###############\n")
+
+	try:
+		activities = []
+
+		if DEBUG:
+			print(f"DEBUG: Fetching live feed for case {case_id}", file=sys.stderr)
+
+		# Get case timeline/history
+		try:
+			timeline_response = api.timeline.get(case_id)
+
+			# Handle if response is a string (JSON) - parse it
+			if isinstance(timeline_response, str):
+				timeline = json.loads(timeline_response)
+			else:
+				timeline = timeline_response
+
+			# Check if it's a dict with timeline data or directly a list
+			if isinstance(timeline, dict):
+				if 'timeline' in timeline:
+					timeline = timeline['timeline']
+				elif 'events' in timeline:
+					timeline = timeline['events']
+				else:
+					timeline = [timeline]
+
+			if timeline:
+				for event in timeline:
+					activities.append({
+						'type': 'Timeline Event',
+						'_createdAt': event.get('_createdAt', 0),
+						'action': event.get('action', event.get('objectType', 'Activity')),
+						'message': event.get('message', event.get('description', '')),
+						'user': event.get('_createdBy', 'Unknown'),
+						'details': event.get('details', '')
+					})
+				if DEBUG:
+					print(f"DEBUG: Found {len(timeline)} timeline events", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: Error fetching timeline: {e}", file=sys.stderr)
+
+		# Get case comments using direct query
+		try:
+			query_payload = {
+				"query": [
+					{"_name": "getCase", "idOrName": case_id},
+					{"_name": "comments"}
+				]
+			}
+			comments = api.session.make_request("POST", "/api/v1/query", json=query_payload)
+
+			if comments:
+				for comment in comments:
+					activities.append({
+						'type': 'Comment',
+						'_createdAt': comment.get('_createdAt', comment.get('createdAt', 0)),
+						'action': 'Comment Added',
+						'message': comment.get('message', ''),
+						'user': comment.get('_createdBy', comment.get('createdBy', 'Unknown')),
+						'details': ''
+					})
+				if DEBUG:
+					print(f"DEBUG: Found {len(comments)} comments", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: Error fetching comments: {e}", file=sys.stderr)
+
+		# Get case tasks
+		try:
+			query_payload = {
+				"query": [
+					{"_name": "getCase", "idOrName": case_id},
+					{"_name": "tasks"}
+				]
+			}
+			tasks = api.session.make_request("POST", "/api/v1/query", json=query_payload)
+
+			if tasks:
+				for task in tasks:
+					activities.append({
+						'type': 'Task',
+						'_createdAt': task.get('_createdAt', 0),
+						'action': f"Task: {task.get('title', 'Untitled')}",
+						'message': f"Status: {task.get('status', 'Unknown')}",
+						'user': task.get('_createdBy', 'Unknown'),
+						'details': task.get('description', '')
+					})
+				if DEBUG:
+					print(f"DEBUG: Found {len(tasks)} tasks", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: Error fetching tasks: {e}", file=sys.stderr)
+
+		# Get case attachments
+		try:
+			attachments = api.case.find_attachments(case_id)
+			if attachments:
+				for attachment in attachments:
+					activities.append({
+						'type': 'Attachment',
+						'_createdAt': attachment.get('_createdAt', 0),
+						'action': 'Attachment Added',
+						'message': f"File: {attachment.get('name', 'unknown')} ({attachment.get('size', 0)} bytes)",
+						'user': attachment.get('_createdBy', 'Unknown'),
+						'details': attachment.get('contentType', '')
+					})
+				if DEBUG:
+					print(f"DEBUG: Found {len(attachments)} attachments", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: Error fetching attachments: {e}", file=sys.stderr)
+
+		# Sort all activities by timestamp (most recent first)
+		activities.sort(key=lambda x: x.get('_createdAt', 0), reverse=True)
+
+		if not activities:
+			if json_output:
+				return {"mode": "case_live_feed", "case_number": case_number, "count": 0, "activities": []}
+			print("No recent activity found for this case.")
+			return
+
+		if json_output:
+			clean = []
+			for activity in activities:
+				clean.append({
+					"type": activity.get('type', ''),
+					"action": activity.get('action', ''),
+					"message": activity.get('message', ''),
+					"created_by": activity.get('user', ''),
+					"created_at": format_timestamp(activity.get('_createdAt')),
+					"details": activity.get('details', '')
+				})
+			return {"mode": "case_live_feed", "case_number": case_number, "count": len(clean), "activities": clean}
+
+		print(f"Showing {len(activities)} activities for case #{case_number}:\n")
+
+		for idx, activity in enumerate(activities, 1):
+			print(f"{idx}. [{activity['type']}] ", end="")
+
+			# Format timestamp
+			if '_createdAt' in activity and activity['_createdAt']:
+				timestamp = activity['_createdAt'] / 1000
+				dt_object = datetime.fromtimestamp(int(timestamp))
+				print(f"{dt_object.strftime('%Y-%m-%d %H:%M:%S')} - ", end="")
+
+			# Action and user
+			print(f"{activity['action']}")
+			print(f"   By: {activity['user']}")
+
+			# Message if present
+			if activity['message']:
+				msg = activity['message'][:150] + "..." if len(activity['message']) > 150 else activity['message']
+				print(f"   {msg}")
+
+			# Details if present
+			if activity['details']:
+				details = str(activity['details'])[:100]
+				print(f"   Details: {details}")
+
+			print()
+
+	except Exception as e:
+		print(f"Error retrieving case live feed: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+
+def display_live_feed(api, limit=20, json_output=False):
+	"""Display recent activity (alerts and case updates) like the Live feed"""
+	if not json_output:
+		print("\n###############")
+		print("LIVE FEED")
+		print("###############\n")
+
+	try:
+		activities = []
+
+		# Get recent alerts
+		if DEBUG:
+			print(f"DEBUG: Fetching recent alerts", file=sys.stderr)
+
+		try:
+			alerts = api.alert.find(filters=None, sortby=[{"_field": "_createdAt", "_order": "desc"}])
+			if alerts:
+				for alert in alerts[:limit]:
+					activities.append({
+						'type': 'Alert',
+						'_createdAt': alert.get('_createdAt', 0),
+						'title': alert.get('title', 'Untitled Alert'),
+						'severity': alert.get('severity', 0),
+						'status': alert.get('status', 'Unknown'),
+						'_id': alert.get('_id', ''),
+						'source': alert.get('source', 'Unknown'),
+						'_createdBy': alert.get('_createdBy', 'Unknown')
+					})
+				if DEBUG:
+					print(f"DEBUG: Found {len(alerts[:limit])} recent alerts", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: Error fetching alerts: {e}", file=sys.stderr)
+
+		# Get recent cases (updated or created)
+		if DEBUG:
+			print(f"DEBUG: Fetching recent cases", file=sys.stderr)
+
+		try:
+			from thehive4py.query.sort import Desc
+			recent_cases = api.case.find(filters=None, sortby=Desc("_updatedAt"))
+			if recent_cases:
+				for case in recent_cases[:limit]:
+					activities.append({
+						'type': 'Case',
+						'_createdAt': case.get('_updatedAt', case.get('_createdAt', 0)),
+						'title': case.get('title', 'Untitled Case'),
+						'severity': case.get('severity', 0),
+						'status': case.get('stage', case.get('status', 'Unknown')),
+						'_id': case.get('_id', ''),
+						'number': case.get('number', ''),
+						'_createdBy': case.get('_updatedBy', case.get('_createdBy', 'Unknown'))
+					})
+				if DEBUG:
+					print(f"DEBUG: Found {len(recent_cases[:limit])} recent cases", file=sys.stderr)
+		except Exception as e:
+			if DEBUG:
+				print(f"DEBUG: Error fetching cases: {e}", file=sys.stderr)
+
+		# Sort all activities by timestamp (most recent first)
+		activities.sort(key=lambda x: x.get('_createdAt', 0), reverse=True)
+
+		# Limit to requested number
+		activities = activities[:limit]
+
+		if not activities:
+			if json_output:
+				return {"mode": "live_feed", "limit": limit, "count": 0, "activities": []}
+			print("No recent activity found.")
+			return
+
+		if json_output:
+			clean = []
+			for activity in activities:
+				_id = activity.get('_id', '')
+				entry = {
+					"type": activity['type'],
+					"title": activity['title'],
+					"severity": severityToStr(activity.get('severity', 0)),
+					"status": activity.get('status', ''),
+					"_id": _id,
+					"created_by": activity.get('_createdBy', ''),
+					"created_at": format_timestamp(activity.get('_createdAt')),
+					"url": (THEHIVE_URL + f"/alerts/{_id}/details") if activity['type'] == 'Alert' else (THEHIVE_URL + f"/cases/{_id}/details")
+				}
+				if activity['type'] == 'Alert':
+					entry["source"] = activity.get('source', '')
+				else:
+					entry["number"] = activity.get('number', '')
+				clean.append(entry)
+			return {"mode": "live_feed", "limit": limit, "count": len(clean), "activities": clean}
+
+		print(f"Showing {len(activities)} most recent activities:\n")
+
+		for idx, activity in enumerate(activities, 1):
+			print(f"{idx}. [{activity['type']}] ", end="")
+
+			# Format timestamp
+			if '_createdAt' in activity and activity['_createdAt']:
+				timestamp = activity['_createdAt'] / 1000
+				dt_object = datetime.fromtimestamp(int(timestamp))
+				print(f"{dt_object.strftime('%Y-%m-%d %H:%M:%S')} - ", end="")
+
+			# Title and severity
+			severity_str = severityToStr(activity.get('severity', 0))
+			print(f"{activity['title']} [{severity_str}]")
+
+			# Additional details
+			if activity['type'] == 'Alert':
+				print(f"   Source: {activity['source']}, Status: {activity['status']}, By: {activity['_createdBy']}")
+			else:
+				print(f"   Case #{activity['number']}, Stage: {activity['status']}, By: {activity['_createdBy']}")
+
+			# URL
+			if activity['_id']:
+				if activity['type'] == 'Alert':
+					url = THEHIVE_URL + f"/alerts/{activity['_id']}/details"
+				else:
+					url = THEHIVE_URL + f"/cases/{activity['_id']}/details"
+				print(f"   URL: {url}")
+
+			print()
+
+	except Exception as e:
+		print(f"Error retrieving live feed: {e}")
+		if DEBUG:
+			import traceback
+			traceback.print_exc()
+
+def display_case_history(api, case_id, json_output=False):
+	"""Display the activity history/timeline for a case"""
+	if not json_output:
+		print("\n###############")
+		print("CASE HISTORY")
+		print("###############\n")
+
+	try:
+		# Use TheHive5 API timeline.get() method
+		timeline_response = api.timeline.get(case_id)
+
+		# Handle if response is a string (JSON) - parse it
+		if isinstance(timeline_response, str):
+			timeline = json.loads(timeline_response)
+		else:
+			timeline = timeline_response
+
+		# Check if it's a dict with timeline data or directly a list
+		if isinstance(timeline, dict):
+			if 'timeline' in timeline:
+				timeline = timeline['timeline']
+			elif 'events' in timeline:
+				timeline = timeline['events']
+			else:
+				# Might be a single timeline object, wrap in list
+				timeline = [timeline]
+
+		if not timeline or len(timeline) == 0:
+			if json_output:
+				return {"mode": "history", "case_id": case_id, "count": 0, "entries": []}
+			print("No history/timeline entries found for this case.")
+			return
+
+		# Sort by date (most recent first)
+		sorted_timeline = sorted(timeline, key=lambda x: x.get('_createdAt', 0), reverse=True)
+
+		if json_output:
+			result = []
+			for entry in sorted_timeline:
+				result.append({
+					"created_at": format_timestamp(entry.get('_createdAt')),
+					"created_by": entry.get('_createdBy', ''),
+					"object_type": entry.get('objectType', ''),
+					"action": entry.get('action', ''),
+					"message": entry.get('message', ''),
+					"description": entry.get('description', ''),
+					"status": entry.get('status', ''),
+					"title": entry.get('title', '')
+				})
+			return {"mode": "history", "case_id": case_id, "count": len(result), "entries": result}
+
+		for idx, entry in enumerate(sorted_timeline, 1):
+			print(f"Activity #{idx}")
+			print("-" * 50)
+
+			# Priority fields to show first
+			priority_fields = ['_createdAt', '_createdBy', 'objectType', 'action',
+			                  'message', 'description', 'status', 'title']
+
+			# Display priority fields first
+			for field in priority_fields:
+				if field in entry:
+					label = field.replace('_', '').title()
+					value = format_field_value(field, entry[field])
+					print(f"  {label:15s}: {value}")
+
+			# Display remaining fields (excluding internal/system fields and already shown)
+			for key, value in entry.items():
+				# Skip already displayed fields and internal fields we don't need
+				if key in priority_fields or key.startswith('_') and key not in ['_id']:
+					continue
+
+				label = key.replace('_', ' ').title()
+				formatted_value = format_field_value(key, value)
+				print(f"  {label:15s}: {formatted_value}")
+
+			print()
+
+	except Exception as e:
+		print(f"Error retrieving case history: {e}")
+		print("Note: History feature requires appropriate API permissions.")
+		if DEBUG:
+			import traceback
+			print(traceback.format_exc())
+
+
+#from thehive4py.api import TheHiveApi
+#from thehive4py.models import Alert, AlertArtifact, CustomFieldHelper
+#from thehive4py.models import Case, CaseTask, CustomFieldHelper, Alert, AlertArtifact, CaseHelper, CaseObservable
+#from thehive4py.query import *
+
+from thehive4py.client import TheHiveApi
+from thehive4py.errors import TheHiveError
+from thehive4py.helpers import now_to_ts 
+from thehive4py.query.filters import Eq, Match, Contains
+from thehive4py.query.sort import Asc
+from thehive4py.types.alert import OutputAlert
+from thehive4py.types.case import (
+    CaseStatus,
+    ImpactStatus,
+    InputBulkUpdateCase,
+    InputUpdateCase,
+    OutputCase,
+)
+from thehive4py.types.observable import InputObservable
+from thehive4py.types.share import InputShare
+from thehive4py.types.comment import InputComment
+        
+
+# this script looks up a case, dumps to clipboard and stdout
+#
+# first it
+
+## main
+args = parse_arguments() # can override configuration options here
+
+# Handle storing credentials
+if args.store_key:
+	if store_credentials():
+		exit(0)
+	else:
+		exit(1)
+
+# Handle showing credentials
+if args.show_credentials:
+	show_credentials()
+	exit(0)
+
+# Get credentials from keychain or command-line
+THEHIVE_URL, THEHIVE_API_KEY = get_credentials(args.url, args.api_key)
+
+# Validate that --history requires --ticket
+if args.history and args.ticket == '':
+	print("ERROR: --history requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --history")
+	sys.exit(1)
+
+# Validate that --comments requires --ticket
+if args.comments and args.ticket == '':
+	print("ERROR: --comments requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --comments")
+	sys.exit(1)
+
+# Validate that --add-comment requires --ticket
+if args.add_comment != '' and args.ticket == '':
+	print("ERROR: --add-comment requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --add-comment 'Your comment here'")
+	print("       ./thehive-cli -t TICKET_NUMBER --add-comment - < comment.txt")
+	sys.exit(1)
+
+# Validate that --add-attachment requires --ticket
+if args.add_attachment != '' and args.ticket == '':
+	print("ERROR: --add-attachment requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --add-attachment /path/to/file.pdf")
+	sys.exit(1)
+
+# Validate that --render-report requires --ticket
+if args.render_report != '' and args.ticket == '':
+	print("ERROR: --render-report requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --render-report TEMPLATE_ID")
+	print("       ./thehive-cli -t TICKET_NUMBER --render-report TEMPLATE_ID --output-file report.html")
+	sys.exit(1)
+
+# Validate that --case-live-feed requires --ticket
+if args.case_live_feed and args.ticket == '':
+	print("ERROR: --case-live-feed requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --case-live-feed")
+	sys.exit(1)
+
+# Validate that --list-observables requires --ticket
+if args.list_observables and args.ticket == '':
+	print("ERROR: --list-observables requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --list-observables")
+	sys.exit(1)
+
+# Validate that --list-pages requires --ticket
+if args.list_pages and args.ticket == '':
+	print("ERROR: --list-pages requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --list-pages")
+	sys.exit(1)
+
+# Validate that --add-page requires --ticket
+if args.add_page and args.ticket == '':
+	print("ERROR: --add-page requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --add-page --page-title TITLE --page-content CONTENT --page-category CATEGORY")
+	sys.exit(1)
+
+# Validate that --update-page requires --ticket
+if args.update_page != '' and args.ticket == '':
+	print("ERROR: --update-page requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --update-page PAGE_ID --page-content CONTENT")
+	sys.exit(1)
+
+# Validate that --interactive requires --ticket (edits the case, or a page with --update-page),
+# except with --create-case, where it fills in the new case instead
+if args.interactive and args.ticket == '' and not args.create_case:
+	print("ERROR: --interactive requires --ticket (or --create-case)")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --interactive                    (edit case title/description)")
+	print("       ./thehive-cli -t TICKET_NUMBER --update-page PAGE_ID --interactive  (edit a page)")
+	print("       ./thehive-cli --create-case --interactive                       (create a case)")
+	sys.exit(1)
+
+# Validate that --update-case requires --ticket
+if args.update_case and args.ticket == '':
+	print("ERROR: --update-case requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --update-case --interactive")
+	print("       ./thehive-cli -t TICKET_NUMBER --update-case --case-title 'New title'")
+	sys.exit(1)
+
+# Validate that observable / timeline-event operations require --ticket
+if (args.add_observable or args.add_ioc) and args.ticket == '':
+	print("ERROR: --add-observable / --add-ioc requires --ticket to be specified")
+	print("Usage: ./thehive-cli -t TICKET_NUMBER --add-observable --obs-type ip --obs-data 1.2.3.4")
+	sys.exit(1)
+
+# Validate that attachment-download / export / task operations require --ticket
+for _t_flag, _t_val in (("--download-attachment", args.download_attachment != ''),
+                        ("--export-case", bool(args.export_case)),
+                        ("--export-misp", args.export_misp != ''),
+                        ("--list-tasks", bool(args.list_tasks)),
+                        ("--add-task", bool(args.add_task)),
+                        ("--add-task-log", args.add_task_log != '')):
+	if _t_val and args.ticket == '':
+		print(f"ERROR: {_t_flag} requires --ticket to be specified")
+		print(f"Usage: ./thehive-cli -t TICKET_NUMBER {_t_flag} ...")
+		sys.exit(1)
+
+for _ev_flag, _ev_val in (("--list-events", args.list_events), ("--add-event", args.add_event),
+                          ("--update-event", args.update_event != ''), ("--delete-event", args.delete_event != '')):
+	if _ev_val and args.ticket == '':
+		print(f"ERROR: {_ev_flag} requires --ticket to be specified")
+		print(f"Usage: ./thehive-cli -t TICKET_NUMBER {_ev_flag} ...")
+		sys.exit(1)
+
+filters = ""
+
+# Handle --list-all option
+if args.list_all:
+	FILTERSUSED = "ALL TICKETS"
+	# No filters - will list all tickets
+else:
+	# set ticket if set
+	if args.ticket != '':
+		hiveParsed = re.findall ( r"\d+", args.ticket ) # get any reference to a number in the comment field
+		if len( hiveParsed) == 1: #number of matches
+			hiveTicket  = hiveParsed[0]
+			### print ("Hive ticket is ", hiveTicket, file=sys.stderr)
+			if len(filters) == 0 and filters=="": #no filter is set
+				#filters = Eq("_createdBy", args.createdby)
+				filters = Eq("number", int(hiveTicket))
+			else: #append filter with AND
+				filters = filters & Eq("number", int(hiveTicket))
+			FILTERSUSED = FILTERSUSED + "case number " + str(hiveTicket) + " "
+
+showdescription = args.showdescription
+#client = TheHiveApi(THEHIVE_URL, THEHIVE_API_KEY)
+
+
+# Apply additional filters (these work with or without --list-all)
+if args.createdby !="":
+	if len(filters) == 0 and filters=="": #no filter is set
+		filters = Eq("_createdBy", args.createdby)
+	else: #append filter with AND
+		filters = filters &  Eq("_createdBy", args.createdby)
+	FILTERSUSED = FILTERSUSED + "created by " + args.createdby + " "
+
+if args.status !="":
+	# TheHive5 uses 'stage' field for case status
+	# Common values: New, InProgress, Resolved, Closed
+	# Use case-insensitive matching by capitalizing first letter
+	status_value = args.status.capitalize()
+
+	if len(filters) == 0 and filters=="": #no filter is set
+		filters = Eq("stage", status_value)
+	else: #append filter with AND
+		filters = filters &  Eq("stage", status_value)
+	FILTERSUSED = FILTERSUSED + "ticket stage: " + status_value + " "
+
+if args.title !="":
+	if len(filters) == 0 and filters=="": #no filter is set
+		filters = Match("title", args.title)
+	else: #append filter with AND
+		filters = filters &  Match("title", args.title)
+	FILTERSUSED = FILTERSUSED + "ticket title: " + args.title + " "
+
+if args.description !="":
+	if len(filters) == 0 and filters=="": #no filter is set
+		filters = Match("description", args.description)
+	else: #append filter with AND
+		filters = filters &  Match("description", args.description)
+	FILTERSUSED = FILTERSUSED + "ticket description: " + args.description + " "
+
+DEBUG=False
+if args.DEBUG:
+	DEBUG = True
+	print("DEBUG MODE ENABLED", file=sys.stderr)
+JSON_OUTPUT = args.json
+api = TheHiveApi(THEHIVE_URL, THEHIVE_API_KEY)
+
+# Handle --whoami (standalone; no ticket needed)
+if args.whoami:
+	result = whoami(api, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+		exit(0 if not (isinstance(result, dict) and result.get("error")) else 1)
+	exit(0 if result else 1)
+
+# Handle --create-case (standalone; does not require an existing ticket)
+if args.create_case:
+	template = args.case_template if args.case_template != '' else None
+	if args.interactive:
+		res = create_case_interactively()
+		if res is None:
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "create_case", "error": "aborted"}, indent=2))
+			sys.exit(1)
+		case_title, case_description = res
+	else:
+		case_title = args.case_title
+		case_description = args.case_description
+		if case_description == '-':
+			if DEBUG:
+				print("DEBUG: Reading case description from stdin", file=sys.stderr)
+			try:
+				case_description = sys.stdin.read()
+			except Exception as e:
+				print(f"ERROR: Failed to read case description from stdin: {e}")
+				sys.exit(1)
+
+		missing = []
+		if case_title == '':
+			missing.append('--case-title')
+		if case_description == '':
+			missing.append('--case-description')
+		if missing:
+			print(f"ERROR: --create-case requires: {', '.join(missing)}  (or use --interactive)")
+			sys.exit(1)
+
+	result = create_case(api, case_title, case_description, template=template, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --list-case-templates
+if args.list_case_templates:
+	result = list_case_templates(api, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+	exit(0)
+
+# Handle --live-feed option
+if args.live_feed > 0:
+	limit = args.live_feed
+	result = display_live_feed(api, limit, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+	exit(0)
+
+# Handle --list-report-templates
+if args.list_report_templates:
+	result = list_report_templates(api, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+	exit(0)
+elif hasattr(args, 'live_feed') and args.live_feed == 0:
+	# User might have used --live-feed without a number, default to 20
+	pass  # Will be handled by default value
+
+# Handle --list-alerts option
+if args.list_alerts:
+	# Build filters for alerts
+	alert_filters = ""
+
+	# Filter by alert status if specified
+	if args.alert_status != "":
+		# Common alert statuses: New, Updated, Ignored, Imported
+		status_value = args.alert_status.capitalize()
+		alert_filters = Eq("status", status_value)
+		if DEBUG:
+			print(f"DEBUG: Filtering alerts on status={status_value}", file=sys.stderr)
+
+	# Filter by title if specified
+	if args.title != "":
+		title_filter = Match("title", args.title)
+		if alert_filters == "":
+			alert_filters = title_filter
+		else:
+			alert_filters = alert_filters & title_filter
+
+	# Filter by severity (can reuse --status for severity levels)
+	# Note: This uses the existing filtering logic
+
+	result = display_alerts(api, filters=alert_filters if alert_filters != "" else None, show_description=args.showdescription, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+	exit(0)
+
+if DEBUG:
+	print(f"DEBUG: Applying filters: {filters}", file=sys.stderr)
+	if args.status:
+		print(f"DEBUG: Status filter applied: stage='{args.status.capitalize()}'", file=sys.stderr)
+
+response = api.case.find(filters=filters, sortby=Asc("_createdAt"), )
+
+if DEBUG:
+	print(f"DEBUG: Found {len(response)} cases", file=sys.stderr)
+	if len(response) > 0:
+		print(f"DEBUG: First case keys: {response[0].keys()}", file=sys.stderr)
+
+# loop on cases
+if JSON_OUTPUT and args.list_all:
+	cases_json = []
+	for case in response:
+		c = {
+			"number": case.get("number"),
+			"title": case.get("title", ""),
+			"stage": case.get("stage", ""),
+			"severity": severityToStr(case.get("severity", 0)),
+			"url": THEHIVE_URL + "/cases/" + str(case["_id"]) + "/details" if "_id" in case else ""
+		}
+		if args.showdescription:
+			c["description"] = case.get("description", "")
+		if "status" in case:
+			c["status"] = case["status"]
+		cases_json.append(c)
+	print(json.dumps({"mode": "list_all", "filters": FILTERSUSED, "count": len(cases_json), "cases": cases_json}, indent=2))
+	exit(0)
+
+if not JSON_OUTPUT:
+	print ("Looking for cases that matched: ", FILTERSUSED)
+
+if DEBUG and len(response) > 0:
+	print(f"DEBUG: First case status field: '{response[0].get('status')}'", file=sys.stderr)
+	print(f"DEBUG: First case stage field: '{response[0].get('stage')}'", file=sys.stderr)
+
+foundCases=""
+for case in response:
+	print ("Case Number:", case["number"])
+	foundCases= foundCases + "Case Number: "+ str(case["number"]) + "\n"
+	print ("Title:", case["title"])
+	foundCases= foundCases + "Title: "+ case["title"] + "\n"
+
+	# Show stage (the filterable field in TheHive5)
+	if "stage" in case:
+		print ("Stage:", case["stage"])
+		foundCases= foundCases + "Stage: "+ case["stage"] + "\n"
+	# Also show status if different
+	if "status" in case and case.get("status") != case.get("stage"):
+		print ("Status:", case["status"])
+		foundCases= foundCases + "Status: "+ case["status"] + "\n"
+
+	if showdescription:
+		print ("Description:", case["description"])
+		foundCases= foundCases + "Description: "+ case["description"] + "\n"
+	print ("Severity:", severityToStr( case["severity"]) )
+	foundCases= foundCases + "Severity: "+ severityToStr( case["severity"]) + "\n"
+	# Add URL for easy access
+	if "_id" in case:
+		case_url = THEHIVE_URL + "/cases/" + str(case["_id"]) + "/details"
+		print ("URL:", case_url)
+		foundCases= foundCases + "URL: "+ case_url + "\n"
+	print ("-" * 50)
+	foundCases= foundCases + "-" * 50 + "\n"
+
+if foundCases=="":
+	print ("nothing found that matched")
+	if args.status:
+		print("\nNote: Use one of these stage values: New, InProgress, Resolved, Closed")
+		print("Example: --status New  or  --status InProgress")
+	exit(0)
+
+# If --list-all was used or if we're not looking for a specific ticket, exit here
+if args.list_all or args.ticket == '':
+	exit(0)
+
+# Continue with detailed single-ticket processing below
+# response is already a list from api.case.find()
+if len(response) == 0:
+	# Get ticket number for error message
+	ticket_num = args.ticket if args.ticket else "unknown"
+	print("No ticket number: ", ticket_num, " found")
+	exit(0)
+
+if DEBUG:
+	print("#######DEBUG######")
+	print(json.dumps(response, indent=4, sort_keys=True))
+	print("#######")
+	print('')
+
+# if we get here we have successfully found the ticket - get the old description.
+
+# Extract ticket number from response
+hiveTicket = response[0].get("number", args.ticket)
+
+# who is doing this work on this api
+### tmpWho = api.get_current_user()
+tmpTitle = response[0]["title"]
+### whoami = tmpWho.json()
+oldDesc = response[0]["description"]
+#summary = response[0]["summary"]
+#
+# case ID uuid is:
+case_id = response[0]["_id"]
+
+if DEBUG:
+	print(f"DEBUG: case_id='{case_id}' (type: {type(case_id)})", file=sys.stderr)
+	print(f"DEBUG: case keys: {list(response[0].keys())}", file=sys.stderr)
+
+# Handle --add-comment if specified
+if args.add_comment != '':
+	comment_text = args.add_comment
+
+	if comment_text == '@editor':
+		# Bare --add-comment (or --add-comment --interactive): compose in $EDITOR
+		if JSON_OUTPUT:
+			print(json.dumps({"success": False, "action": "add_comment", "case_id": case_id, "error": "interactive editor is not supported with --json; pass the comment text or use '-' for stdin"}, indent=2))
+			exit(1)
+		comment_text = compose_comment_interactively("")
+		if not comment_text:
+			print("Empty comment; nothing added.")
+			exit(1)
+	elif comment_text == '-':
+		# Read from stdin
+		if DEBUG:
+			print("DEBUG: Reading comment from stdin", file=sys.stderr)
+		try:
+			comment_text = sys.stdin.read().strip()
+			if not comment_text:
+				print("ERROR: No comment text provided on stdin")
+				sys.exit(1)
+		except Exception as e:
+			print(f"ERROR: Failed to read from stdin: {e}")
+			sys.exit(1)
+	elif args.interactive:
+		# --add-comment "draft" --interactive: edit the supplied text in $EDITOR
+		if JSON_OUTPUT:
+			print(json.dumps({"success": False, "action": "add_comment", "case_id": case_id, "error": "interactive editor is not supported with --json"}, indent=2))
+			exit(1)
+		comment_text = compose_comment_interactively(comment_text)
+		if not comment_text:
+			print("Empty comment; nothing added.")
+			exit(1)
+
+	# Add the comment
+	result = add_comment_to_case(api, case_id, comment_text, json_output=JSON_OUTPUT)
+
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		if not (args.comments or args.history or args.showdescription or args.add_attachment != ''):
+			print(json.dumps(result, indent=2))
+			exit(0 if success else 1)
+	else:
+		success = bool(result)
+		if success:
+			# If other display options are set, continue to show them
+			if not (args.comments or args.history or args.showdescription or args.add_attachment != ''):
+				# Nothing else to show, exit
+				exit(0)
+		else:
+			# Failed to add comment
+			exit(1)
+
+# Handle --add-attachment if specified
+if args.add_attachment != '':
+	file_path = args.add_attachment
+	upload_name = args.attachment_name if args.attachment_name != '' else None
+
+	# Decide whether to launch the picker: bare --add-attachment picks from the current
+	# directory; --add-attachment DIR picks from inside that directory; a file path is used directly.
+	pick_root = None
+	if file_path == '@pick':
+		pick_root = '.'
+	elif os.path.isdir(os.path.expanduser(file_path)):
+		pick_root = os.path.expanduser(file_path)
+
+	if pick_root is not None:
+		if JSON_OUTPUT:
+			print(json.dumps({"success": False, "action": "add_attachment", "case_id": case_id, "error": "interactive picker is not supported with --json; pass a file path"}, indent=2))
+			exit(1)
+		file_path = pick_file_interactively(pick_root, sort_mode=args.attachment_sort, reverse=args.attachment_sort_reverse)
+		if not file_path:
+			print("No file selected; nothing uploaded.")
+			exit(1)
+		# Offer to rename on upload, unless --attachment-name was already given
+		if upload_name is None:
+			upload_name = prompt_upload_name(os.path.basename(file_path))
+
+	# Add the attachment
+	result = add_attachment_to_case(api, case_id, file_path, timestamp=args.timestamp_attachment, upload_name=upload_name, json_output=JSON_OUTPUT)
+
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		if not (args.comments or args.history or args.showdescription):
+			print(json.dumps(result, indent=2))
+			exit(0 if success else 1)
+	else:
+		success = bool(result)
+		if success:
+			# If other display options are set, continue to show them
+			if not (args.comments or args.history or args.showdescription):
+				# Nothing else to show, exit
+				exit(0)
+		else:
+			# Failed to add attachment
+			exit(1)
+
+# Handle --render-report if specified
+if args.render_report != '':
+	template_id = args.render_report
+	output_file = args.output_file if args.output_file != '' else None
+
+	# Render the report
+	result = render_case_report(api, case_id, template_id, output_file, json_output=JSON_OUTPUT)
+
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		if not (args.comments or args.history or args.showdescription):
+			print(json.dumps(result, indent=2))
+			exit(0 if success else 1)
+	else:
+		success = bool(result)
+		if success:
+			# Report rendered successfully
+			# If other display options are set, continue to show them
+			if not (args.comments or args.history or args.showdescription):
+				# Nothing else to show, exit
+				exit(0)
+		else:
+			# Failed to render report
+			exit(1)
+
+# Handle --download-attachment (bare -> list attachments + IDs; ID -> download)
+if args.download_attachment != '':
+	if args.download_attachment == '@list':
+		result = list_case_attachments(api, case_id, hiveTicket, json_output=JSON_OUTPUT)
+		if JSON_OUTPUT:
+			print(json.dumps(result, indent=2))
+		exit(0)
+	result = download_case_attachment(api, case_id, hiveTicket, args.download_attachment,
+	                                  output_file=(args.output_file or None), json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --export-case
+if args.export_case:
+	export_password = args.export_password
+	if export_password == '':
+		if JSON_OUTPUT:
+			print(json.dumps({"success": False, "action": "export_case", "case_id": case_id, "error": "provide --export-password (cannot prompt in --json mode)"}, indent=2))
+			exit(1)
+		try:
+			export_password = getpass.getpass("Password to encrypt the export archive: ").strip()
+		except Exception as e:
+			print(f"ERROR: could not read password: {e}")
+			sys.exit(1)
+		if not export_password:
+			print("ERROR: a password is required to export the case")
+			sys.exit(1)
+	result = export_case(api, case_id, hiveTicket, export_password,
+	                     output_file=(args.output_file or None), json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --export-misp
+if args.export_misp != '':
+	result = export_case_to_misp(api, case_id, hiveTicket, args.export_misp, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --list-tasks
+if args.list_tasks:
+	result = list_case_tasks(api, case_id, hiveTicket, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+	exit(0)
+
+# Handle --add-task
+if args.add_task:
+	if args.interactive:
+		if JSON_OUTPUT:
+			print(json.dumps({"success": False, "action": "add_task", "case_id": case_id, "error": "interactive editor is not supported with --json; pass --task-title/--task-description"}, indent=2))
+			exit(1)
+		task = create_task_interactively(
+			title=args.task_title,
+			group=args.task_group,
+			description=('' if args.task_description in ('', '-') else args.task_description),
+		)
+		if task is None:
+			exit(1)
+	else:
+		if args.task_title == '':
+			print("ERROR: --add-task requires --task-title  (or use --interactive)")
+			sys.exit(1)
+		task_desc = args.task_description
+		if task_desc == '-':
+			try:
+				task_desc = sys.stdin.read().strip()
+			except Exception as e:
+				print(f"ERROR: Failed to read task description from stdin: {e}")
+				sys.exit(1)
+		task = {"title": args.task_title}
+		if args.task_group != '':
+			task["group"] = args.task_group
+		if task_desc != '':
+			task["description"] = task_desc
+
+	result = add_task_to_case(api, case_id, hiveTicket, task, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --add-task-log (message via --task-log-message / "-" stdin, else compose in $EDITOR)
+if args.add_task_log != '':
+	task_id_for_log = args.add_task_log
+	log_message = args.task_log_message
+	if log_message == '-':
+		try:
+			log_message = sys.stdin.read().strip()
+		except Exception as e:
+			print(f"ERROR: Failed to read task log from stdin: {e}")
+			sys.exit(1)
+	elif log_message == '':
+		# No message supplied -> compose in $EDITOR (also how --interactive is honoured)
+		if JSON_OUTPUT:
+			print(json.dumps({"success": False, "action": "add_task_log", "task_id": task_id_for_log, "error": "provide --task-log-message (cannot open an editor in --json mode)"}, indent=2))
+			exit(1)
+		log_message = compose_comment_interactively("")
+	if not log_message:
+		print("Empty task log; nothing added.")
+		exit(1)
+	result = add_task_log(api, task_id_for_log, log_message, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --list-observables
+if args.list_observables:
+	result = display_case_observables(api, case_id, hiveTicket, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+	exit(0)
+
+# Handle --list-pages
+if args.list_pages:
+	result = display_case_pages(api, case_id, hiveTicket, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+	exit(0)
+
+# Handle --add-page
+if args.add_page:
+	if args.interactive:
+		# Compose the new page in $EDITOR (seeded with any --page-* fields supplied)
+		if JSON_OUTPUT:
+			print(json.dumps({"success": False, "action": "add_page", "case_id": case_id, "error": "interactive editor is not supported with --json; pass --page-title/--page-content/--page-category"}, indent=2))
+			exit(1)
+		page = create_page_interactively(
+			title=args.page_title,
+			category=args.page_category,
+			order=('' if args.page_order is None else str(args.page_order)),
+			content=('' if args.page_content in ('', '-') else args.page_content),
+		)
+		if page is None:
+			exit(1)
+		result = add_page_to_case(api, case_id, page["title"], page["content"], page["category"], order=page.get("order"), json_output=JSON_OUTPUT)
+	else:
+		page_content = args.page_content
+		if page_content == '-':
+			if DEBUG:
+				print("DEBUG: Reading page content from stdin", file=sys.stderr)
+			try:
+				page_content = sys.stdin.read()
+			except Exception as e:
+				print(f"ERROR: Failed to read page content from stdin: {e}")
+				sys.exit(1)
+
+		# title, content and category are required to create a page
+		missing = []
+		if args.page_title == '':
+			missing.append('--page-title')
+		if page_content == '':
+			missing.append('--page-content')
+		if args.page_category == '':
+			missing.append('--page-category')
+		if missing:
+			print(f"ERROR: --add-page requires: {', '.join(missing)}  (or use --interactive)")
+			print("Usage: ./thehive-cli -t TICKET --add-page --page-title TITLE --page-content CONTENT --page-category CATEGORY")
+			sys.exit(1)
+
+		result = add_page_to_case(api, case_id, args.page_title, page_content, args.page_category, order=args.page_order, json_output=JSON_OUTPUT)
+
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --update-page
+if args.update_page != '':
+	if args.interactive:
+		# Interactive edit: download current values, open $EDITOR, apply only if changed
+		current_page = get_case_page(api, case_id, args.update_page)
+		if current_page is None:
+			print(f"✗ Error: page '{args.update_page}' not found in case {hiveTicket}")
+			print("  Tip: list page IDs with: ./thehive-cli -t TICKET --list-pages --json")
+			sys.exit(1)
+
+		update_fields = edit_page_interactively(current_page)
+
+		if update_fields is None:
+			# Aborted or unparseable — nothing applied
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "update_page", "case_id": case_id, "page_id": args.update_page, "changed": False, "error": "aborted"}, indent=2))
+			sys.exit(1)
+
+		if not update_fields:
+			# No changes detected — do not call the API
+			if JSON_OUTPUT:
+				print(json.dumps({"success": True, "action": "update_page", "case_id": case_id, "page_id": args.update_page, "changed": False, "updated_fields": []}, indent=2))
+			else:
+				print("No changes detected; page not updated.")
+			exit(0)
+
+		# Lost-update guard: bail if a field we changed was edited elsewhere while we were in $EDITOR
+		conflicts = check_lost_update(current_page, update_fields.keys(), lambda: get_case_page(api, case_id, args.update_page))
+		if conflicts:
+			saved = report_lost_update(conflicts, update_fields, json_output=JSON_OUTPUT)
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "update_page", "case_id": case_id, "page_id": args.update_page, "conflict": list(conflicts.keys()), "saved_edit": saved}, indent=2))
+			sys.exit(1)
+	else:
+		page_content = args.page_content
+		if page_content == '-':
+			if DEBUG:
+				print("DEBUG: Reading page content from stdin", file=sys.stderr)
+			try:
+				page_content = sys.stdin.read()
+			except Exception as e:
+				print(f"ERROR: Failed to read page content from stdin: {e}")
+				sys.exit(1)
+
+		# Build the update payload from provided fields only (all are optional)
+		update_fields = {}
+		if args.page_title != '':
+			update_fields["title"] = args.page_title
+		if page_content != '':
+			update_fields["content"] = page_content
+		if args.page_category != '':
+			update_fields["category"] = args.page_category
+		if args.page_order is not None:
+			update_fields["order"] = args.page_order
+
+		if not update_fields:
+			print("ERROR: --update-page requires at least one of --page-title, --page-content, --page-category, --page-order")
+			print("       (or use --interactive to edit the page in $EDITOR)")
+			sys.exit(1)
+
+	result = update_case_page(api, case_id, args.update_page, update_fields, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --add-observable / --add-ioc (--add-ioc forces ioc=true on everything it creates)
+if args.add_observable or args.add_ioc:
+	force_ioc = bool(args.add_ioc)
+	obs_mode = '--add-ioc' if args.add_ioc else '--add-observable'
+	if args.interactive:
+		obs_list = add_observables_interactively()
+		if obs_list is None:
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "add_observable", "case_id": case_id, "error": "aborted"}, indent=2))
+			sys.exit(1)
+		if not obs_list:
+			if JSON_OUTPUT:
+				print(json.dumps({"success": True, "action": "add_observable", "case_id": case_id, "created_count": 0, "created": []}, indent=2))
+			else:
+				print("No observables found in the buffer; nothing created.")
+			exit(0)
+		if force_ioc:
+			for _o in obs_list:
+				_o["ioc"] = True
+	elif args.obs_file != '':
+		if not os.path.isfile(args.obs_file):
+			print(f"✗ Error: file not found: {args.obs_file}")
+			sys.exit(1)
+		obs = {"dataType": "file", "_path": args.obs_file}
+		if args.obs_ioc or force_ioc:
+			obs["ioc"] = True
+		if args.obs_sighted:
+			obs["sighted"] = True
+		if args.obs_tags != '':
+			obs["tags"] = [t.strip() for t in args.obs_tags.split(",") if t.strip()]
+		if args.obs_tlp is not None:
+			obs["tlp"] = args.obs_tlp
+		if args.obs_message != '':
+			obs["message"] = args.obs_message
+		obs_list = [obs]
+	else:
+		if args.obs_type == '':
+			print(f"ERROR: {obs_mode} requires --obs-type (or --obs-file, or --interactive)")
+			sys.exit(1)
+		# Resolve data: stdin (one per line), comma-separated list, or single value
+		if args.obs_data == '-':
+			if DEBUG:
+				print("DEBUG: Reading observable data from stdin", file=sys.stderr)
+			try:
+				raw = sys.stdin.read()
+			except Exception as e:
+				print(f"ERROR: Failed to read observable data from stdin: {e}")
+				sys.exit(1)
+			values = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+		elif args.obs_data != '':
+			values = [v.strip() for v in args.obs_data.split(",") if v.strip()]
+		else:
+			values = []
+		if not values:
+			print(f"ERROR: {obs_mode} requires --obs-data (a value, comma-list, or '-' for stdin), or --interactive")
+			sys.exit(1)
+		obs = {"dataType": args.obs_type, "data": values if len(values) > 1 else values[0]}
+		if args.obs_ioc or force_ioc:
+			obs["ioc"] = True
+		if args.obs_sighted:
+			obs["sighted"] = True
+		if args.obs_tags != '':
+			obs["tags"] = [t.strip() for t in args.obs_tags.split(",") if t.strip()]
+		if args.obs_tlp is not None:
+			obs["tlp"] = args.obs_tlp
+		if args.obs_message != '':
+			obs["message"] = args.obs_message
+		obs_list = [obs]
+
+	result = add_observables_to_case(api, case_id, obs_list, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --list-events
+if args.list_events:
+	result = display_case_events(api, case_id, hiveTicket, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		print(json.dumps(result, indent=2))
+	exit(0)
+
+# Handle --delete-event
+if args.delete_event != '':
+	result = delete_case_event(api, args.delete_event, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --add-event
+if args.add_event:
+	if args.interactive:
+		event = create_event_interactively()
+		if event is None:
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "add_event", "case_id": case_id, "error": "aborted"}, indent=2))
+			sys.exit(1)
+	else:
+		if args.event_title == '':
+			print("ERROR: --add-event requires --event-title (or use --interactive)")
+			sys.exit(1)
+		if args.event_date == '':
+			date_ms = int(datetime.now().timestamp() * 1000)
+		else:
+			date_ms = parse_datetime_to_ms(args.event_date)
+			if date_ms is None:
+				print(f"ERROR: could not parse --event-date '{args.event_date}' (use 'YYYY-MM-DD HH:MM' or epoch-ms)")
+				sys.exit(1)
+		event = {"date": date_ms, "title": args.event_title}
+		event_desc = args.event_description
+		if event_desc == '-':
+			try:
+				event_desc = sys.stdin.read().rstrip("\n")
+			except Exception as e:
+				print(f"ERROR: Failed to read event description from stdin: {e}")
+				sys.exit(1)
+		if event_desc != '':
+			event["description"] = event_desc
+		if args.event_end != '':
+			end_ms = parse_datetime_to_ms(args.event_end)
+			if end_ms is None:
+				print(f"ERROR: could not parse --event-end '{args.event_end}' (use 'YYYY-MM-DD HH:MM' or epoch-ms)")
+				sys.exit(1)
+			event["endDate"] = end_ms
+
+	result = add_case_event(api, case_id, hiveTicket, event, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle --update-event
+if args.update_event != '':
+	if args.interactive:
+		current_event = get_case_event(api, case_id, args.update_event)
+		if current_event is None:
+			print(f"✗ Error: custom event '{args.update_event}' not found in case {hiveTicket}")
+			print("  Tip: list event IDs with: ./thehive-cli -t TICKET --list-events")
+			sys.exit(1)
+		update_fields = edit_event_interactively(current_event)
+		if update_fields is None:
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "update_event", "event_id": args.update_event, "changed": False, "error": "aborted"}, indent=2))
+			sys.exit(1)
+		if not update_fields:
+			if JSON_OUTPUT:
+				print(json.dumps({"success": True, "action": "update_event", "event_id": args.update_event, "changed": False, "updated_fields": []}, indent=2))
+			else:
+				print("No changes detected; event not updated.")
+			exit(0)
+
+		# Lost-update guard: bail if a field we changed was edited elsewhere while we were in $EDITOR
+		conflicts = check_lost_update(current_event, update_fields.keys(), lambda: get_case_event(api, case_id, args.update_event))
+		if conflicts:
+			saved = report_lost_update(conflicts, update_fields, json_output=JSON_OUTPUT)
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "update_event", "event_id": args.update_event, "conflict": list(conflicts.keys()), "saved_edit": saved}, indent=2))
+			sys.exit(1)
+	else:
+		update_fields = {}
+		if args.event_title != '':
+			update_fields["title"] = args.event_title
+		if args.event_date != '':
+			date_ms = parse_datetime_to_ms(args.event_date)
+			if date_ms is None:
+				print(f"ERROR: could not parse --event-date '{args.event_date}' (use 'YYYY-MM-DD HH:MM' or epoch-ms)")
+				sys.exit(1)
+			update_fields["date"] = date_ms
+		if args.event_end != '':
+			end_ms = parse_datetime_to_ms(args.event_end)
+			if end_ms is None:
+				print(f"ERROR: could not parse --event-end '{args.event_end}' (use 'YYYY-MM-DD HH:MM' or epoch-ms)")
+				sys.exit(1)
+			update_fields["endDate"] = end_ms
+		event_desc = args.event_description
+		if event_desc == '-':
+			try:
+				event_desc = sys.stdin.read().rstrip("\n")
+			except Exception as e:
+				print(f"ERROR: Failed to read event description from stdin: {e}")
+				sys.exit(1)
+		if event_desc != '':
+			update_fields["description"] = event_desc
+		if not update_fields:
+			print("ERROR: --update-event requires at least one --event-* field (or use --interactive)")
+			sys.exit(1)
+
+	result = update_case_event(api, args.update_event, update_fields, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+# Handle case update: explicit --update-case, or the -t TICKET --interactive shorthand
+# (without --update-page). Interactive edits title/description in $EDITOR; otherwise
+# --case-title/--case-description provide a non-interactive update.
+if args.update_case or (args.interactive and args.update_page == '' and args.add_comment == '' and args.add_attachment == ''):
+	if args.interactive:
+		current_case = {
+			"title": response[0].get("title", ""),
+			"description": response[0].get("description", ""),
+		}
+		update_fields = edit_case_interactively(current_case)
+
+		if update_fields is None:
+			# Aborted or unparseable — nothing applied
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "update_case", "case_id": case_id, "number": hiveTicket, "changed": False, "error": "aborted"}, indent=2))
+			sys.exit(1)
+
+		if not update_fields:
+			# No changes detected — do not call the API
+			if JSON_OUTPUT:
+				print(json.dumps({"success": True, "action": "update_case", "case_id": case_id, "number": hiveTicket, "changed": False, "updated_fields": []}, indent=2))
+			else:
+				print("No changes detected; case not updated.")
+			exit(0)
+
+		# Lost-update guard: bail if title/description changed elsewhere while we were in $EDITOR
+		conflicts = check_lost_update(current_case, update_fields.keys(), lambda: api.case.get(case_id))
+		if conflicts:
+			saved = report_lost_update(conflicts, update_fields, json_output=JSON_OUTPUT)
+			if JSON_OUTPUT:
+				print(json.dumps({"success": False, "action": "update_case", "case_id": case_id, "number": hiveTicket, "conflict": list(conflicts.keys()), "saved_edit": saved}, indent=2))
+			sys.exit(1)
+	else:
+		# Non-interactive --update-case: build from --case-title / --case-description
+		update_fields = {}
+		if args.case_title != '':
+			update_fields["title"] = args.case_title
+		case_desc = args.case_description
+		if case_desc == '-':
+			if DEBUG:
+				print("DEBUG: Reading case description from stdin", file=sys.stderr)
+			try:
+				case_desc = sys.stdin.read()
+			except Exception as e:
+				print(f"ERROR: Failed to read case description from stdin: {e}")
+				sys.exit(1)
+		if case_desc != '':
+			update_fields["description"] = case_desc
+
+		if not update_fields:
+			print("ERROR: --update-case requires --interactive, or at least one of --case-title / --case-description")
+			sys.exit(1)
+
+	result = update_case_fields(api, case_id, hiveTicket, update_fields, json_output=JSON_OUTPUT)
+	if JSON_OUTPUT:
+		success = result.get("success", False) if isinstance(result, dict) else bool(result)
+		print(json.dumps(result, indent=2))
+		exit(0 if success else 1)
+	exit(0 if result else 1)
+
+if DEBUG:
+	print(f"DEBUG: Full case keys: {response[0].keys()}", file=sys.stderr)
+	print(f"DEBUG: Case _id from response: {case_id}", file=sys.stderr)
+	print(f"DEBUG: Case _id type: {type(case_id)}", file=sys.stderr)
+	print(f"DEBUG: Case number: {response[0].get('number')}", file=sys.stderr)
+	# Check all ID-like fields
+	for key in response[0].keys():
+		if 'id' in key.lower():
+			print(f"DEBUG: {key}: {response[0].get(key)}", file=sys.stderr)
+
+# any tasks for this case_id
+# Note: Task retrieval using old API - commented out for now
+# tasks = api.get_case_tasks( case_id)
+# tasks2 = tasks.text.json()
+
+# for each task - check for tasklogs
+
+# check len and also oldDesc exists
+
+### newDesc = oldDesc +  newComment
+newDesc = oldDesc
+
+# Extract common fields used in both JSON and text output
+status=""
+createdAt=""
+createdBy=""
+summary=""
+if "status" in response[0]:
+	status = response[0]["status"]
+if "_createdAt" in response[0]:
+	createdAt = format_timestamp(response[0]["_createdAt"])
+elif "createdAt" in response[0]:
+	createdAt = format_timestamp(response[0]["createdAt"])
+if "_createdBy" in response[0]:
+	createdBy = str(response[0]["_createdBy"])
+elif "createdBy" in response[0]:
+	createdBy = str(response[0]["createdBy"])
+if "summary" in response[0] and response[0]["summary"]:
+	summary = response[0]["summary"]
+
+if JSON_OUTPUT:
+	case_data = {
+		"number": hiveTicket,
+		"title": tmpTitle,
+		"_id": case_id,
+		"created_at": createdAt,
+		"created_by": createdBy,
+		"status": status,
+		"stage": response[0].get("stage"),
+		"severity": severityToStr(response[0].get("severity", 0)),
+		"summary": summary,
+		"description": newDesc,
+		"url": THEHIVE_URL + "/cases/" + str(case_id) + "/details",
+		"observables": []
+	}
+	try:
+		case_details = api.case.get(case_id)
+		if "observables" in case_details and len(case_details["observables"]) > 0:
+			for obs in case_details["observables"]:
+				case_data["observables"].append({"dataType": obs.get("dataType"), "data": obs.get("data")})
+		else:
+			try:
+				from thehive4py.query.filters import Parent
+				observables = api.observable.find(filters=Parent("case", case_id))
+				for obs in (observables or []):
+					case_data["observables"].append({"dataType": obs.get("dataType"), "data": obs.get("data")})
+			except:
+				pass
+	except:
+		pass
+
+	output = {"mode": "ticket", "case": case_data}
+	if args.history:
+		r = display_case_history(api, case_id, json_output=True)
+		output["history"] = r.get("entries", []) if isinstance(r, dict) else []
+	if args.comments:
+		r = display_case_comments(api, case_id, json_output=True)
+		output["comments"] = r.get("comments", []) if isinstance(r, dict) else []
+	if args.case_live_feed:
+		r = display_case_live_feed(api, case_id, hiveTicket, json_output=True)
+		output["live_feed"] = r.get("activities", []) if isinstance(r, dict) else []
+
+	print(json.dumps(output, indent=2))
+	exit(0)
+
+print("###############")
+#print("HIVE case: ", str(hiveTicket) )
+print("HiveTicket:",str(hiveTicket)," ",tmpTitle)
+print("URL:\n"+ THEHIVE_URL + "/cases/" + str(case_id) + "/details")
+if status:
+	print("Status: "+ status )
+# Check for both field name variants (with and without underscore)
+if "_createdAt" in response[0]:
+	tmpDt = response[0]["_createdAt"]  / 1000
+	dt_object = datetime.fromtimestamp( int (tmpDt) )
+	print("Created: "+ str(dt_object) )
+elif "createdAt" in response[0]:
+	tmpDt = response[0]["createdAt"]  / 1000
+	dt_object = datetime.fromtimestamp( int (tmpDt) )
+	print("Created: "+ str(dt_object) )
+if "_createdBy" in response[0]:
+	print("Created By: "+ response[0]["_createdBy"] )
+elif "createdBy" in response[0]:
+	print("Created By: "+ response[0]["createdBy"] )
+if "summary" in response[0]:
+	tmpSum = response[0]["summary"]
+	if tmpSum:
+		print("Summary: "+ response[0]["summary"] )
+		print("\n")
+else:
+	pass
+
+print("Description:\n"+ newDesc)
+print("###############")
+print("OBSERVABLES")
+print("###############")
+outputStr = "###############\n"+ "HIVE case: "+ str(hiveTicket) + " "+tmpTitle+ "\nURL:\n"+ THEHIVE_URL + "/cases/" + str(case_id) + "/details\n"+ "Status: " + status + "\n" + "Created: " + createdAt + "\n" + "CreatedBy: " + createdBy + "Summary:\n" + summary+ "\n"+"Description:\n"+ newDesc+ "\n###############\nOBSERVABLES\n############\n"
+#
+# observables
+
+# Call the API to get observables
+obsnum = 1
+_inline_observables = []
+try:
+	# Strategy 1: query API (most reliable in TheHive5)
+	_obs_query = {
+		"query": [
+			{"_name": "getCase", "idOrName": case_id},
+			{"_name": "observables"}
+		]
+	}
+	_obs_resp = api.session.make_request("POST", "/api/v1/query", json=_obs_query)
+	if _obs_resp:
+		_inline_observables = _obs_resp
+except Exception:
+	pass
+
+if not _inline_observables:
+	try:
+		# Strategy 2: case.get() with embedded observables
+		case_details = api.case.get(case_id)
+		if "observables" in case_details and len(case_details["observables"]) > 0:
+			_inline_observables = case_details["observables"]
+	except Exception:
+		pass
+
+if _inline_observables:
+	for observable in _inline_observables:
+		outputStr = outputStr + "Observable " + str(obsnum) + "\n"
+		print ("Observable " + str(obsnum) )
+		obsnum = obsnum + 1
+		if "dataType" in observable:
+			print("  dataType: " + observable["dataType"])
+			outputStr = outputStr + "  dataType: " + observable["dataType"] + "\n"
+		if "data" in observable:
+			print("  data: " + observable["data"])
+			outputStr = outputStr + "  data: " + observable["data"] + "\n"
+else:
+	print("  No observables found for this case")
+
+print("###############")
+
+# Display case history if requested
+if args.history:
+	display_case_history(api, case_id, json_output=JSON_OUTPUT)
+
+# Display case comments if requested
+if args.comments:
+	display_case_comments(api, case_id, json_output=JSON_OUTPUT)
+
+# Display case-specific live feed if requested
+if args.case_live_feed:
+	display_case_live_feed(api, case_id, hiveTicket, json_output=JSON_OUTPUT)
+
+if not JSON_OUTPUT:
+	write_to_clipboard( outputStr)
+#print("#SENT#TO#CLIPB")
+exit(0)
+
+

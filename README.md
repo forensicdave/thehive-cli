@@ -75,13 +75,25 @@ silently overwriting their work (your edit is preserved to a temp file):
 
 ### Installation
 
-```bash
-# Install required dependencies
-pip install thehive4py keyring
+`thehive-cli` is a single Python 3 script. Grab it from the repo (`git clone`, or download
+`thehive-cli` from the web UI), then install the dependencies:
 
-# Optional: Install shtab for shell tab completion
+```bash
+# Install dependencies  (or: pip install thehive4py keyring)
+pip install -r requirements.txt
+
+# Optional: shell tab-completion
 pip install shtab
 ```
+
+Make it executable and check it runs:
+
+```bash
+chmod +x thehive-cli      # files downloaded via the GitHub web UI often lose the executable bit
+./thehive-cli --version
+```
+
+> No executable bit? Just run it as `python3 thehive-cli …`.
 
 ### Initial Setup
 
@@ -681,4 +693,4 @@ Completion includes **filename completion** for the file-path options (`--add-at
 
 ## License
 
-This tool is provided as-is for use with TheHive security incident response platform.
+Released under the [MIT License](LICENSE). Provided as-is, with no warranty.

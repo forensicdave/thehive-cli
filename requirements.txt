@@ -1,0 +1,7 @@
+# thehive-cli runtime dependencies  ->  pip install -r requirements.txt
+thehive4py        # TheHive 5 API client
+keyring           # store the URL + API key in the system keychain
+requests          # HTTP (also pulled in by thehive4py; imported directly)
+
+# Optional: shell tab-completion ( ./thehive-cli --print-completion bash|zsh|fish )
+# shtab

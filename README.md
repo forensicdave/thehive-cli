@@ -2,6 +2,10 @@
 
 A comprehensive command-line tool for interacting with TheHive security incident response platform.
 
+> **TheHive** is a Security Incident Response Platform made by **StrangeBee** — you can find it at [strangebee.com](https://strangebee.com).
+>
+> **Not affiliated:** `thehive-cli` is an independent, unofficial project. It is **not associated with, endorsed by, or supported by StrangeBee or TheHive** in any way. It was built for fun, in the hope it helps out fellow DFIR and Blue team mates!. 🐝
+
 ## Features
 
 - **Case Management**: List, search, view, and manage cases
@@ -48,11 +52,6 @@ while your editor was open — useful because TheHive itself does last-write-win
 
 ![Interactive case editing](screenshots/interactive-case.png)
 
-Note: alerts if case Title/Description changed while being edited locally
-
-![Interactive case editing](screenshots/interactive-softLocking.png)
-
-
 ### Creating/editing a page — `thehive-cli --case 666 --add-page -i`
 
 ![Interactive page editing](screenshots/interactive-page.png)
@@ -64,6 +63,13 @@ Note: alerts if case Title/Description changed while being edited locally
 ### Composing a comment — `thehive-cli --case 666 --add-comment -i`
 
 ![Interactive comment editing](screenshots/interactive-comment.png)
+
+### Concurrent-edit protection — the lost-update guard
+
+If someone changes the same field while your editor is open, the save is aborted instead of
+silently overwriting their work (your edit is preserved to a temp file):
+
+![Lost-update guard catching a concurrent modification](screenshots/interactive-softLocking.png)
 
 ## Quick Start
 
